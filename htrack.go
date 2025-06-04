@@ -347,7 +347,7 @@ func (ht *HTrack) autoCleanup() {
 // DefaultConfig 返回默认配置
 func DefaultConfig() *Config {
 	return &Config{
-		MaxConnections:     1000,
+		MaxConnections:     10000,
 		MaxTransactions:    10000,
 		ConnectionTimeout:  30 * time.Second,
 		TransactionTimeout: 60 * time.Second,
@@ -357,7 +357,7 @@ func DefaultConfig() *Config {
 		AutoCleanup:        true,
 		CleanupInterval:    5 * time.Minute,
 		ChannelBufferSize:  100,
-		EnableChannels:     false, // 默认不启用
+		EnableChannels:     true, // 默认不启用
 	}
 }
 
