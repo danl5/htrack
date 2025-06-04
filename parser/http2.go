@@ -1,0 +1,848 @@
+package parser
+
+import (
+	"bytes"
+	"encoding/binary"
+	"errors"
+	"fmt"
+	"net/http"
+	"net/url"
+	"strconv"
+	"time"
+
+	"github.com/danl5/htrack/parser/http2"
+	"github.com/danl5/htrack/types"
+	"golang.org/x/net/http2/hpack"
+)
+
+// HTTP2Parser HTTP/2解析器
+type HTTP2Parser struct {
+	version      types.HTTPVersion
+	hpackDecoder *hpack.Decoder
+	connections  map[string]*HTTP2Connection
+	settings     http2.SettingsMap
+}
+
+// HTTP2Connection HTTP/2连接状态
+type HTTP2Connection struct {
+	ID           string
+	Streams      map[uint32]*HTTP2Stream
+	Settings     http2.SettingsMap
+	PeerSettings http2.SettingsMap
+	LastStreamID uint32
+	GoAway       bool
+}
+
+// HTTP2Stream HTTP/2流状态
+type HTTP2Stream struct {
+	ID           uint32
+	State        types.StreamState
+	Headers      http.Header
+	Data         []byte
+	EndStream    bool
+	EndHeaders   bool
+	Request      *types.HTTPRequest
+	Response     *types.HTTPResponse
+	HeaderBlocks [][]byte
+	CreatedAt    time.Time
+	// 头部分片重组状态
+	HeadersStarted       bool
+	AwaitingContinuation bool
+	// 数据累积
+	DataFragments   [][]byte
+	TotalDataLength int64
+}
+
+// NewHTTP2Parser 创建HTTP/2解析器
+func NewHTTP2Parser() *HTTP2Parser {
+	return &HTTP2Parser{
+		version:      types.HTTP2,
+		hpackDecoder: hpack.NewDecoder(4096, nil),
+		connections:  make(map[string]*HTTP2Connection),
+		settings:     http2.NewDefaultSettings(),
+	}
+}
+
+// getOrCreateStream 获取或创建流
+func (p *HTTP2Parser) getOrCreateStream(connID string, streamID uint32) *HTTP2Stream {
+	conn, exists := p.connections[connID]
+	if !exists {
+		conn = &HTTP2Connection{
+			ID:      connID,
+			Streams: make(map[uint32]*HTTP2Stream),
+		}
+		p.connections[connID] = conn
+	}
+
+	stream, exists := conn.Streams[streamID]
+	if !exists {
+		stream = &HTTP2Stream{
+			ID:        streamID,
+			CreatedAt: time.Now(),
+			Headers:   make(http.Header),
+		}
+		conn.Streams[streamID] = stream
+	}
+
+	return stream
+}
+
+// ParseRequest 解析HTTP/2请求
+func (p *HTTP2Parser) ParseRequest(data []byte) (*types.HTTPRequest, error) {
+	// 检查最小帧头长度
+	if len(data) < 9 {
+		return nil, errors.New("data too short for HTTP/2 frame header")
+	}
+
+	// 检查连接前导（只在连接开始时）
+	if len(data) >= 24 && bytes.HasPrefix(data, []byte("PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")) {
+		return p.parseConnectionPreface(data)
+	}
+
+	// 解析普通帧（最小9字节）
+	return p.parseFrames(data)
+}
+
+// ParseResponse 解析HTTP/2响应
+func (p *HTTP2Parser) ParseResponse(data []byte) (*types.HTTPResponse, error) {
+	return p.parseFramesForResponse(data)
+}
+
+// IsComplete 检查数据是否完整
+func (p *HTTP2Parser) IsComplete(data []byte) bool {
+	if len(data) < 9 {
+		return false
+	}
+
+	// 解析帧头
+	header, err := http2.ParseFrameHeader(data)
+	if err != nil {
+		return false
+	}
+
+	// 检查是否有完整的帧
+	return len(data) >= int(9+header.Length)
+}
+
+// GetRequiredBytes 获取所需字节数
+func (p *HTTP2Parser) GetRequiredBytes(data []byte) int {
+	if len(data) < 9 {
+		return 9
+	}
+
+	header, err := http2.ParseFrameHeader(data)
+	if err != nil {
+		return 9
+	}
+
+	return int(9 + header.Length)
+}
+
+// parseConnectionPreface 解析连接前导
+func (p *HTTP2Parser) parseConnectionPreface(data []byte) (*types.HTTPRequest, error) {
+	preface := "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
+	if len(data) < len(preface) {
+		return nil, errors.New("incomplete connection preface")
+	}
+
+	if !bytes.HasPrefix(data, []byte(preface)) {
+		return nil, errors.New("invalid connection preface")
+	}
+
+	// 创建连接前导请求
+	request := &types.HTTPRequest{
+		Method:     "PRI",
+		URL:        &url.URL{Path: "*"},
+		Proto:      "HTTP/2.0",
+		ProtoMajor: 2,
+		ProtoMinor: 0,
+		Headers:    make(http.Header),
+		Body:       data[len(preface):],
+		Timestamp:  time.Now(),
+		Complete:   true,
+		RawData:    data,
+	}
+
+	return request, nil
+}
+
+// parseFrames 解析HTTP/2帧
+func (p *HTTP2Parser) parseFrames(data []byte) (*types.HTTPRequest, error) {
+	offset := 0
+	var request *types.HTTPRequest
+
+	for offset < len(data) {
+		if len(data[offset:]) < 9 {
+			break
+		}
+
+		header, err := http2.ParseFrameHeader(data[offset:])
+		if err != nil {
+			return nil, err
+		}
+
+		frameEnd := offset + 9 + int(header.Length)
+		if frameEnd > len(data) {
+			break
+		}
+
+		frameData := data[offset+9 : frameEnd]
+		req, err := p.parseFrame(header, frameData)
+		if err != nil {
+			return nil, err
+		}
+
+		if req != nil {
+			request = req
+		}
+
+		offset = frameEnd
+	}
+
+	return request, nil
+}
+
+// parseFrame 解析单个帧
+func (p *HTTP2Parser) parseFrame(header http2.FrameHeader, data []byte) (*types.HTTPRequest, error) {
+	switch header.Type {
+	case http2.FrameHeaders:
+		return p.parseHeadersFrame(header, data)
+	case http2.FrameData:
+		return p.parseDataFrame(header, data)
+	case http2.FrameSettings:
+		return p.parseSettingsFrame(header, data)
+	case http2.FrameContinuation:
+		return p.parseContinuationFrame(header, data)
+	default:
+		// 其他帧类型暂时忽略
+		return nil, nil
+	}
+}
+
+// parseHeadersFrame 解析HEADERS帧（支持分片重组）
+func (p *HTTP2Parser) parseHeadersFrame(header http2.FrameHeader, data []byte) (*types.HTTPRequest, error) {
+	if header.StreamID == 0 {
+		return nil, errors.New("HEADERS frame with stream ID 0")
+	}
+
+	// 获取或创建流
+	stream := p.getOrCreateStream("default", header.StreamID)
+
+	// 检查流状态
+	if stream.AwaitingContinuation {
+		return nil, errors.New("received HEADERS frame while awaiting CONTINUATION")
+	}
+
+	offset := 0
+
+	// 处理优先级信息
+	if header.Flags&http2.FlagHeadersPriority != 0 {
+		if len(data) < 5 {
+			return nil, errors.New("invalid HEADERS frame with priority")
+		}
+		offset += 5
+	}
+
+	// 处理填充
+	if header.Flags&http2.FlagHeadersPadded != 0 {
+		if len(data) < 1 {
+			return nil, errors.New("invalid padded HEADERS frame")
+		}
+		padLen := data[0]
+		offset += 1
+		if int(padLen) >= len(data)-offset {
+			return nil, errors.New("invalid padding length")
+		}
+		data = data[offset : len(data)-int(padLen)]
+	} else {
+		data = data[offset:]
+	}
+
+	// 初始化头部块累积
+	stream.HeaderBlocks = [][]byte{data}
+	stream.HeadersStarted = true
+	stream.EndHeaders = header.Flags&http2.FlagHeadersEndHeaders != 0
+	stream.EndStream = header.Flags&http2.FlagHeadersEndStream != 0
+
+	// 如果没有END_HEADERS标志，等待CONTINUATION帧
+	if !stream.EndHeaders {
+		stream.AwaitingContinuation = true
+		return nil, nil // 等待CONTINUATION帧
+	}
+
+	// 头部完整，进行解码
+	return p.decodeCompleteHeaders(stream)
+}
+
+// parseDataFrame 解析DATA帧
+func (p *HTTP2Parser) parseDataFrame(header http2.FrameHeader, data []byte) (*types.HTTPRequest, error) {
+	if header.StreamID == 0 {
+		return nil, errors.New("DATA frame with stream ID 0")
+	}
+
+	offset := 0
+
+	// 处理填充
+	if header.Flags&http2.FlagDataPadded != 0 {
+		if len(data) < 1 {
+			return nil, errors.New("invalid padded DATA frame")
+		}
+		padLen := data[0]
+		offset += 1
+		if int(padLen) >= len(data)-offset {
+			return nil, errors.New("invalid padding length")
+		}
+		data = data[offset : len(data)-int(padLen)]
+	} else {
+		data = data[offset:]
+	}
+
+	// 创建包含数据的请求片段
+	request := &types.HTTPRequest{
+		Body:      data,
+		Timestamp: time.Now(),
+		StreamID:  &header.StreamID,
+		Complete:  header.Flags&http2.FlagDataEndStream != 0,
+		RawData:   data,
+	}
+
+	return request, nil
+}
+
+// parseSettingsFrame 解析SETTINGS帧
+func (p *HTTP2Parser) parseSettingsFrame(header http2.FrameHeader, data []byte) (*types.HTTPRequest, error) {
+	if header.StreamID != 0 {
+		return nil, errors.New("SETTINGS frame with non-zero stream ID")
+	}
+
+	if header.Flags&http2.FlagSettingsAck != 0 {
+		// SETTINGS ACK帧
+		if len(data) != 0 {
+			return nil, errors.New("SETTINGS ACK frame with payload")
+		}
+		return nil, nil
+	}
+
+	if len(data)%6 != 0 {
+		return nil, errors.New("invalid SETTINGS frame length")
+	}
+
+	// 解析设置参数
+	for i := 0; i < len(data); i += 6 {
+		id := http2.SettingID(data[i])<<8 | http2.SettingID(data[i+1])
+		val := uint32(data[i+2])<<24 | uint32(data[i+3])<<16 | uint32(data[i+4])<<8 | uint32(data[i+5])
+		p.settings.Set(id, val)
+	}
+
+	return nil, nil
+}
+
+// parseContinuationFrame 解析CONTINUATION帧（支持分片重组）
+func (p *HTTP2Parser) parseContinuationFrame(header http2.FrameHeader, data []byte) (*types.HTTPRequest, error) {
+	if header.StreamID == 0 {
+		return nil, errors.New("CONTINUATION frame with stream ID 0")
+	}
+
+	// 获取流
+	stream := p.getOrCreateStream("default", header.StreamID)
+
+	// 检查流状态
+	if !stream.AwaitingContinuation {
+		return nil, errors.New("received CONTINUATION frame without preceding HEADERS")
+	}
+
+	// 累积头部块
+	stream.HeaderBlocks = append(stream.HeaderBlocks, data)
+	stream.EndHeaders = header.Flags&http2.FlagContinuationEndHeaders != 0
+
+	// 如果还没有END_HEADERS标志，继续等待
+	if !stream.EndHeaders {
+		return nil, nil // 继续等待更多CONTINUATION帧
+	}
+
+	// 头部完整，进行解码
+	stream.AwaitingContinuation = false
+	return p.decodeCompleteHeaders(stream)
+}
+
+// decodeCompleteHeaders 解码完整的头部块序列
+func (p *HTTP2Parser) decodeCompleteHeaders(stream *HTTP2Stream) (*types.HTTPRequest, error) {
+	// 合并所有头部块
+	var completeHeaderBlock []byte
+	for _, block := range stream.HeaderBlocks {
+		completeHeaderBlock = append(completeHeaderBlock, block...)
+	}
+
+	// 解码头部块
+	headerFields, err := p.hpackDecoder.DecodeFull(completeHeaderBlock)
+	if err != nil {
+		return nil, fmt.Errorf("HPACK decode error: %v", err)
+	}
+
+	// 转换为http.Header
+	headers := make(http.Header)
+	for _, hf := range headerFields {
+		headers.Add(hf.Name, hf.Value)
+	}
+
+	// 构建HTTP请求
+	request := &types.HTTPRequest{
+		Headers:    headers,
+		Proto:      "HTTP/2.0",
+		ProtoMajor: 2,
+		ProtoMinor: 0,
+		Timestamp:  time.Now(),
+		StreamID:   &stream.ID,
+		RawData:    completeHeaderBlock,
+	}
+
+	// 提取伪头部
+	if method := headers.Get(":method"); method != "" {
+		request.Method = method
+		headers.Del(":method")
+	}
+
+	if path := headers.Get(":path"); path != "" {
+		parsedURL, err := url.Parse(path)
+		if err != nil {
+			return nil, err
+		}
+		request.URL = parsedURL
+		headers.Del(":path")
+	}
+
+	if scheme := headers.Get(":scheme"); scheme != "" {
+		if request.URL != nil {
+			request.URL.Scheme = scheme
+		}
+		headers.Del(":scheme")
+	}
+
+	if authority := headers.Get(":authority"); authority != "" {
+		if request.URL != nil {
+			request.URL.Host = authority
+		}
+		headers.Del(":authority")
+	}
+
+	// 检查内容长度
+	if contentLengthStr := headers.Get("content-length"); contentLengthStr != "" {
+		contentLength, err := strconv.ParseInt(contentLengthStr, 10, 64)
+		if err == nil {
+			request.ContentLength = contentLength
+		}
+	}
+
+	// 检查是否结束流
+	request.Complete = stream.EndStream
+
+	// 保存到流中
+	stream.Request = request
+	stream.Headers = headers
+
+	return request, nil
+}
+
+// parseFramesForResponse 解析响应帧
+func (p *HTTP2Parser) parseFramesForResponse(data []byte) (*types.HTTPResponse, error) {
+	offset := 0
+	var response *types.HTTPResponse
+
+	for offset < len(data) {
+		if len(data[offset:]) < 9 {
+			break
+		}
+
+		header, err := http2.ParseFrameHeader(data[offset:])
+		if err != nil {
+			return nil, err
+		}
+
+		frameEnd := offset + 9 + int(header.Length)
+		if frameEnd > len(data) {
+			break
+		}
+
+		frameData := data[offset+9 : frameEnd]
+		resp, err := p.parseResponseFrame(header, frameData)
+		if err != nil {
+			return nil, err
+		}
+
+		if resp != nil {
+			response = resp
+		}
+
+		offset = frameEnd
+	}
+
+	return response, nil
+}
+
+// parseResponseFrame 解析响应帧
+func (p *HTTP2Parser) parseResponseFrame(header http2.FrameHeader, data []byte) (*types.HTTPResponse, error) {
+	switch header.Type {
+	case http2.FrameHeaders:
+		return p.parseResponseHeadersFrame(header, data)
+	case http2.FrameData:
+		return p.parseResponseDataFrame(header, data)
+	default:
+		return nil, nil
+	}
+}
+
+// parseResponseHeadersFrame 解析响应HEADERS帧
+func (p *HTTP2Parser) parseResponseHeadersFrame(header http2.FrameHeader, data []byte) (*types.HTTPResponse, error) {
+	if header.StreamID == 0 {
+		return nil, errors.New("response HEADERS frame with stream ID 0")
+	}
+
+	offset := 0
+
+	// 处理优先级和填充（与请求相同）
+	if header.Flags&http2.FlagHeadersPriority != 0 {
+		if len(data) < 5 {
+			return nil, errors.New("invalid response HEADERS frame with priority")
+		}
+		offset += 5
+	}
+
+	if header.Flags&http2.FlagHeadersPadded != 0 {
+		if len(data) < 1 {
+			return nil, errors.New("invalid padded response HEADERS frame")
+		}
+		padLen := data[0]
+		offset += 1
+		if int(padLen) >= len(data)-offset {
+			return nil, errors.New("invalid padding length")
+		}
+		data = data[offset : len(data)-int(padLen)]
+	} else {
+		data = data[offset:]
+	}
+
+	// 解码头部块
+	headerFields, err := p.hpackDecoder.DecodeFull(data)
+	if err != nil {
+		return nil, fmt.Errorf("HPACK decode error: %v", err)
+	}
+
+	// 转换为http.Header
+	headers := make(http.Header)
+	for _, hf := range headerFields {
+		headers.Add(hf.Name, hf.Value)
+	}
+
+	// 构建HTTP响应
+	response := &types.HTTPResponse{
+		Headers:    headers,
+		Proto:      "HTTP/2.0",
+		ProtoMajor: 2,
+		ProtoMinor: 0,
+		Timestamp:  time.Now(),
+		StreamID:   &header.StreamID,
+		RawData:    data,
+	}
+
+	// 提取状态码
+	if status := headers.Get(":status"); status != "" {
+		statusCode, err := strconv.Atoi(status)
+		if err == nil {
+			response.StatusCode = statusCode
+			response.Status = fmt.Sprintf("%d %s", statusCode, http.StatusText(statusCode))
+		}
+		headers.Del(":status")
+	}
+
+	// 检查内容长度
+	if contentLengthStr := headers.Get("content-length"); contentLengthStr != "" {
+		contentLength, err := strconv.ParseInt(contentLengthStr, 10, 64)
+		if err == nil {
+			response.ContentLength = contentLength
+		}
+	}
+
+	// 检查是否结束流
+	response.Complete = header.Flags&http2.FlagHeadersEndStream != 0
+
+	return response, nil
+}
+
+// parseResponseDataFrame 解析响应DATA帧
+func (p *HTTP2Parser) parseResponseDataFrame(header http2.FrameHeader, data []byte) (*types.HTTPResponse, error) {
+	if header.StreamID == 0 {
+		return nil, errors.New("response DATA frame with stream ID 0")
+	}
+
+	offset := 0
+
+	// 处理填充
+	if header.Flags&http2.FlagDataPadded != 0 {
+		if len(data) < 1 {
+			return nil, errors.New("invalid padded response DATA frame")
+		}
+		padLen := data[0]
+		offset += 1
+		if int(padLen) >= len(data)-offset {
+			return nil, errors.New("invalid padding length")
+		}
+		data = data[offset : len(data)-int(padLen)]
+	} else {
+		data = data[offset:]
+	}
+
+	// 创建包含数据的响应片段
+	response := &types.HTTPResponse{
+		Body:      data,
+		Timestamp: time.Now(),
+		StreamID:  &header.StreamID,
+		Complete:  header.Flags&http2.FlagDataEndStream != 0,
+		RawData:   data,
+	}
+
+	return response, nil
+}
+
+func (p *HTTP2Parser) DetectVersion(data []byte) types.HTTPVersion {
+	// 1. 检查HTTP/2连接前导（24字节）
+	http2Preface := []byte("PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")
+	if len(data) >= len(http2Preface) && bytes.Equal(data[:len(http2Preface)], http2Preface) {
+		return types.HTTP2
+	}
+
+	// 2. 检查HTTP/2帧格式（更严格的验证）
+	if len(data) >= 9 {
+		return validateHTTP2Frame(data)
+	}
+
+	return types.Unknown
+}
+
+func validateHTTP2Frame(data []byte) types.HTTPVersion {
+	// 解析帧头（9字节）
+	length := binary.BigEndian.Uint32(append([]byte{0}, data[:3]...))
+	frameType := data[3]
+	flags := data[4]
+	streamID := binary.BigEndian.Uint32(data[5:9]) & 0x7FFFFFFF // 清除保留位
+
+	// 验证帧长度（RFC 7540: 最大16KB，除非SETTINGS_MAX_FRAME_SIZE修改）
+	if length > 16384 {
+		return types.Unknown
+	}
+
+	// 验证帧类型（RFC 7540定义的帧类型）
+	validFrameTypes := map[byte]bool{
+		0: true, // DATA
+		1: true, // HEADERS
+		2: true, // PRIORITY
+		3: true, // RST_STREAM
+		4: true, // SETTINGS
+		5: true, // PUSH_PROMISE
+		6: true, // PING
+		7: true, // GOAWAY
+		8: true, // WINDOW_UPDATE
+		9: true, // CONTINUATION
+	}
+
+	if !validFrameTypes[frameType] {
+		return types.Unknown
+	}
+
+	// 验证流ID的合法性
+	switch frameType {
+	case 4, 6, 7, 8: // SETTINGS, PING, GOAWAY, WINDOW_UPDATE
+		if frameType == 4 || frameType == 6 || frameType == 7 {
+			if streamID != 0 {
+				return types.Unknown // 这些帧必须在连接级别
+			}
+		}
+	case 0, 1, 2, 3, 5, 9: // DATA, HEADERS, PRIORITY, RST_STREAM, PUSH_PROMISE, CONTINUATION
+		if streamID == 0 {
+			return types.Unknown // 这些帧必须关联到流
+		}
+	}
+
+	// 验证标志位的合法性
+	if !validateFrameFlags(frameType, flags) {
+		return types.Unknown
+	}
+
+	// 检查是否有完整的帧数据
+	if len(data) < int(9+length) {
+		return types.Unknown // 数据不完整
+	}
+
+	// 检查HTTP/2帧格式
+	if len(data) >= 9 {
+		header, err := http2.ParseFrameHeader(data)
+		if err == nil && validateFrameLength(header) == nil {
+			return types.HTTP2
+		}
+	}
+
+	return types.HTTP2
+}
+
+// buildDataRequest 构建包含累积数据的请求
+func (p *HTTP2Parser) buildDataRequest(stream *HTTP2Stream) (*types.HTTPRequest, error) {
+	// 合并所有数据片段
+	var completeData []byte
+	for _, fragment := range stream.DataFragments {
+		completeData = append(completeData, fragment...)
+	}
+
+	// 如果流已有请求（来自HEADERS），更新其数据
+	if stream.Request != nil {
+		stream.Request.Body = completeData
+		stream.Request.Complete = stream.EndStream
+		stream.Request.RawData = completeData
+		return stream.Request, nil
+	}
+
+	// 否则创建新的数据请求
+	request := &types.HTTPRequest{
+		Body:      completeData,
+		Timestamp: time.Now(),
+		StreamID:  &stream.ID,
+		Complete:  stream.EndStream,
+		RawData:   completeData,
+	}
+
+	stream.Request = request
+	return request, nil
+}
+
+// ParseAllRequests 解析所有HTTP/2请求流
+func (p *HTTP2Parser) ParseAllRequests(data []byte) ([]*types.HTTPRequest, error) {
+	var requests []*types.HTTPRequest
+	offset := 0
+
+	// 检查连接前导
+	if len(data) >= 24 && bytes.HasPrefix(data, []byte("PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")) {
+		offset = 24
+	}
+
+	for offset < len(data) {
+		if len(data[offset:]) < 9 {
+			break
+		}
+
+		header, err := http2.ParseFrameHeader(data[offset:])
+		if err != nil {
+			return requests, err
+		}
+
+		frameEnd := offset + 9 + int(header.Length)
+		if frameEnd > len(data) {
+			break
+		}
+
+		frameData := data[offset+9 : frameEnd]
+		req, err := p.parseFrame(header, frameData)
+		if err != nil {
+			return requests, err
+		}
+
+		if req != nil {
+			requests = append(requests, req)
+		}
+
+		offset = frameEnd
+	}
+
+	return requests, nil
+}
+
+// ParseAllResponses 解析所有HTTP/2响应流
+func (p *HTTP2Parser) ParseAllResponses(data []byte) ([]*types.HTTPResponse, error) {
+	var responses []*types.HTTPResponse
+	offset := 0
+
+	for offset < len(data) {
+		if len(data[offset:]) < 9 {
+			break
+		}
+
+		header, err := http2.ParseFrameHeader(data[offset:])
+		if err != nil {
+			return responses, err
+		}
+
+		frameEnd := offset + 9 + int(header.Length)
+		if frameEnd > len(data) {
+			break
+		}
+
+		frameData := data[offset+9 : frameEnd]
+		resp, err := p.parseResponseFrame(header, frameData)
+		if err != nil {
+			return responses, err
+		}
+
+		if resp != nil {
+			responses = append(responses, resp)
+		}
+
+		offset = frameEnd
+	}
+
+	return responses, nil
+}
+
+func validateFrameFlags(frameType, flags byte) bool {
+	validFlags := map[byte]byte{
+		0: 0x01 | 0x08,               // DATA: END_STREAM | PADDED
+		1: 0x01 | 0x04 | 0x08 | 0x20, // HEADERS: END_STREAM | END_HEADERS | PADDED | PRIORITY
+		2: 0x00,                      // PRIORITY: 无标志
+		3: 0x00,                      // RST_STREAM: 无标志
+		4: 0x01,                      // SETTINGS: ACK
+		5: 0x04 | 0x08,               // PUSH_PROMISE: END_HEADERS | PADDED
+		6: 0x01,                      // PING: ACK
+		7: 0x00,                      // GOAWAY: 无标志
+		8: 0x00,                      // WINDOW_UPDATE: 无标志
+		9: 0x04,                      // CONTINUATION: END_HEADERS
+	}
+
+	validMask, exists := validFlags[frameType]
+	if !exists {
+		return false
+	}
+
+	return (flags & ^validMask) == 0
+}
+
+func validateFrameLength(header http2.FrameHeader) error {
+	switch header.Type {
+	case http2.FrameSettings:
+		// SETTINGS帧长度必须是6的倍数
+		if header.Length%6 != 0 {
+			return errors.New("invalid SETTINGS frame length")
+		}
+	case http2.FramePing:
+		// PING帧必须是8字节
+		if header.Length != 8 {
+			return errors.New("invalid PING frame length")
+		}
+	case http2.FrameWindowUpdate:
+		// WINDOW_UPDATE帧必须是4字节
+		if header.Length != 4 {
+			return errors.New("invalid WINDOW_UPDATE frame length")
+		}
+	case http2.FrameRSTStream:
+		// RST_STREAM帧必须是4字节
+		if header.Length != 4 {
+			return errors.New("invalid RST_STREAM frame length")
+		}
+	case http2.FramePriority:
+		// PRIORITY帧必须是5字节
+		if header.Length != 5 {
+			return errors.New("invalid PRIORITY frame length")
+		}
+	case http2.FrameGoAway:
+		// GOAWAY帧至少8字节
+		if header.Length < 8 {
+			return errors.New("invalid GOAWAY frame length")
+		}
+	}
+	return nil
+}
