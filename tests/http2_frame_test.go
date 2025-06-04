@@ -115,7 +115,7 @@ func TestHTTP2ParserFrameProcessing(t *testing.T) {
 
 	// 测试连接前导
 	preface := "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
-	req, err := parser.ParseRequest([]byte(preface))
+	req, err := parser.ParseRequest("test-conn", []byte(preface))
 	if err != nil {
 		t.Fatalf("解析连接前导失败: %v", err)
 	}
@@ -131,14 +131,14 @@ func TestHTTP2ParserFrameProcessing(t *testing.T) {
 		0x00, 0x00, 0x00, 0x00, // Stream ID: 0
 	}
 
-	req, err = parser.ParseRequest(settingsFrame)
+	req, err = parser.ParseRequest("test-conn", settingsFrame)
 	if err != nil {
 		t.Fatalf("解析SETTINGS帧失败: %v", err)
 	}
 
 	// 测试简单的HEADERS帧（模拟GET请求）
 	headersData := createSimpleHeadersFrame(t)
-	req, err = parser.ParseRequest(headersData)
+	req, err = parser.ParseRequest("test-conn", headersData)
 	if err != nil {
 		t.Fatalf("解析HEADERS帧失败: %v", err)
 	}

@@ -14,8 +14,8 @@ import (
 
 // Parser HTTP解析器接口
 type Parser interface {
-	ParseRequest(data []byte) (*types.HTTPRequest, error)
-	ParseResponse(data []byte) (*types.HTTPResponse, error)
+	ParseRequest(connectionID string, data []byte) (*types.HTTPRequest, error)
+	ParseResponse(connectionID string, data []byte) (*types.HTTPResponse, error)
 	DetectVersion(data []byte) types.HTTPVersion
 	IsComplete(data []byte) bool
 	GetRequiredBytes(data []byte) int
@@ -92,14 +92,14 @@ func (pp *PacketProcessor) ProcessPacket(connectionID string, data []byte, seque
 
 	if direction == types.DirectionClientToServer {
 		// 解析请求
-		req, err := parser.ParseRequest(buffer.data)
+		req, err := parser.ParseRequest(connectionID, buffer.data)
 		if err != nil {
 			return nil, err
 		}
 		result.Request = req
 	} else {
 		// 解析响应
-		resp, err := parser.ParseResponse(buffer.data)
+		resp, err := parser.ParseResponse(connectionID, buffer.data)
 		if err != nil {
 			return nil, err
 		}

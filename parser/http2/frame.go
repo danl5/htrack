@@ -26,14 +26,14 @@ const (
 type FrameFlags uint8
 
 const (
-	FlagDataEndStream   FrameFlags = 0x1
-	FlagDataPadded      FrameFlags = 0x8
-	FlagHeadersEndStream FrameFlags = 0x1
-	FlagHeadersEndHeaders FrameFlags = 0x4
-	FlagHeadersPadded    FrameFlags = 0x8
-	FlagHeadersPriority  FrameFlags = 0x20
-	FlagSettingsAck      FrameFlags = 0x1
-	FlagPingAck          FrameFlags = 0x1
+	FlagDataEndStream          FrameFlags = 0x1
+	FlagDataPadded             FrameFlags = 0x8
+	FlagHeadersEndStream       FrameFlags = 0x1
+	FlagHeadersEndHeaders      FrameFlags = 0x4
+	FlagHeadersPadded          FrameFlags = 0x8
+	FlagHeadersPriority        FrameFlags = 0x20
+	FlagSettingsAck            FrameFlags = 0x1
+	FlagPingAck                FrameFlags = 0x1
 	FlagContinuationEndHeaders FrameFlags = 0x4
 	FlagPushPromiseEndHeaders  FrameFlags = 0x4
 	FlagPushPromisePadded      FrameFlags = 0x8
@@ -41,10 +41,10 @@ const (
 
 // FrameHeader HTTP/2帧头
 type FrameHeader struct {
-	Length   uint32    // 24位长度
-	Type     FrameType // 8位类型
+	Length   uint32     // 24位长度
+	Type     FrameType  // 8位类型
 	Flags    FrameFlags // 8位标志
-	StreamID uint32    // 31位流ID（最高位保留）
+	StreamID uint32     // 31位流ID（最高位保留）
 }
 
 // Frame HTTP/2帧接口
@@ -64,10 +64,10 @@ type DataFrame struct {
 // HeadersFrame HEADERS帧
 type HeadersFrame struct {
 	FrameHeader
-	Priority   *PriorityParam
+	Priority    *PriorityParam
 	HeaderBlock []byte
-	PadLen     uint8
-	Padding    []byte
+	PadLen      uint8
+	Padding     []byte
 }
 
 // PriorityFrame PRIORITY帧
@@ -178,14 +178,14 @@ func WriteFrameHeader(header FrameHeader, buf []byte) error {
 }
 
 // Header 实现Frame接口
-func (f *DataFrame) Header() FrameHeader { return f.FrameHeader }
-func (f *HeadersFrame) Header() FrameHeader { return f.FrameHeader }
-func (f *PriorityFrame) Header() FrameHeader { return f.FrameHeader }
-func (f *RSTStreamFrame) Header() FrameHeader { return f.FrameHeader }
-func (f *SettingsFrame) Header() FrameHeader { return f.FrameHeader }
-func (f *PushPromiseFrame) Header() FrameHeader { return f.FrameHeader }
-func (f *PingFrame) Header() FrameHeader { return f.FrameHeader }
-func (f *GoAwayFrame) Header() FrameHeader { return f.FrameHeader }
+func (f *DataFrame) Header() FrameHeader         { return f.FrameHeader }
+func (f *HeadersFrame) Header() FrameHeader      { return f.FrameHeader }
+func (f *PriorityFrame) Header() FrameHeader     { return f.FrameHeader }
+func (f *RSTStreamFrame) Header() FrameHeader    { return f.FrameHeader }
+func (f *SettingsFrame) Header() FrameHeader     { return f.FrameHeader }
+func (f *PushPromiseFrame) Header() FrameHeader  { return f.FrameHeader }
+func (f *PingFrame) Header() FrameHeader         { return f.FrameHeader }
+func (f *GoAwayFrame) Header() FrameHeader       { return f.FrameHeader }
 func (f *WindowUpdateFrame) Header() FrameHeader { return f.FrameHeader }
 func (f *ContinuationFrame) Header() FrameHeader { return f.FrameHeader }
 

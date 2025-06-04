@@ -88,7 +88,7 @@ func (p *HTTP2Parser) getOrCreateStream(connID string, streamID uint32) *HTTP2St
 }
 
 // ParseRequest 解析HTTP/2请求
-func (p *HTTP2Parser) ParseRequest(data []byte) (*types.HTTPRequest, error) {
+func (p *HTTP2Parser) ParseRequest(connectionID string, data []byte) (*types.HTTPRequest, error) {
 	// 检查最小帧头长度
 	if len(data) < 9 {
 		return nil, errors.New("data too short for HTTP/2 frame header")
@@ -96,16 +96,16 @@ func (p *HTTP2Parser) ParseRequest(data []byte) (*types.HTTPRequest, error) {
 
 	// 检查连接前导（只在连接开始时）
 	if len(data) >= 24 && bytes.HasPrefix(data, []byte("PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")) {
-		return p.parseConnectionPreface(data)
+		return p.parseConnectionPreface(connectionID, data)
 	}
 
 	// 解析普通帧（最小9字节）
-	return p.parseFrames(data)
+	return p.parseFrames(connectionID, data)
 }
 
 // ParseResponse 解析HTTP/2响应
-func (p *HTTP2Parser) ParseResponse(data []byte) (*types.HTTPResponse, error) {
-	return p.parseFramesForResponse(data)
+func (p *HTTP2Parser) ParseResponse(connectionID string, data []byte) (*types.HTTPResponse, error) {
+	return p.parseFramesForResponse(connectionID, data)
 }
 
 // IsComplete 检查数据是否完整
@@ -139,7 +139,7 @@ func (p *HTTP2Parser) GetRequiredBytes(data []byte) int {
 }
 
 // parseConnectionPreface 解析连接前导
-func (p *HTTP2Parser) parseConnectionPreface(data []byte) (*types.HTTPRequest, error) {
+func (p *HTTP2Parser) parseConnectionPreface(connectionID string, data []byte) (*types.HTTPRequest, error) {
 	preface := "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
 	if len(data) < len(preface) {
 		return nil, errors.New("incomplete connection preface")
@@ -167,7 +167,7 @@ func (p *HTTP2Parser) parseConnectionPreface(data []byte) (*types.HTTPRequest, e
 }
 
 // parseFrames 解析HTTP/2帧
-func (p *HTTP2Parser) parseFrames(data []byte) (*types.HTTPRequest, error) {
+func (p *HTTP2Parser) parseFrames(connectionID string, data []byte) (*types.HTTPRequest, error) {
 	offset := 0
 	var request *types.HTTPRequest
 
@@ -187,7 +187,7 @@ func (p *HTTP2Parser) parseFrames(data []byte) (*types.HTTPRequest, error) {
 		}
 
 		frameData := data[offset+9 : frameEnd]
-		req, err := p.parseFrame(header, frameData)
+		req, err := p.parseFrame(connectionID, header, frameData)
 		if err != nil {
 			return nil, err
 		}
@@ -203,30 +203,30 @@ func (p *HTTP2Parser) parseFrames(data []byte) (*types.HTTPRequest, error) {
 }
 
 // parseFrame 解析单个帧
-func (p *HTTP2Parser) parseFrame(header http2.FrameHeader, data []byte) (*types.HTTPRequest, error) {
+func (p *HTTP2Parser) parseFrame(connectionID string, header http2.FrameHeader, data []byte) (*types.HTTPRequest, error) {
 	switch header.Type {
 	case http2.FrameHeaders:
-		return p.parseHeadersFrame(header, data)
+		return p.parseHeadersFrame(connectionID, header, data)
 	case http2.FrameData:
-		return p.parseDataFrame(header, data)
+		return p.parseDataFrame(connectionID, header, data)
 	case http2.FrameSettings:
 		return p.parseSettingsFrame(header, data)
 	case http2.FrameContinuation:
-		return p.parseContinuationFrame(header, data)
+		return p.parseContinuationFrame(connectionID, header, data)
 	default:
 		// 其他帧类型暂时忽略
 		return nil, nil
 	}
 }
 
-// parseHeadersFrame 解析HEADERS帧（支持分片重组）
-func (p *HTTP2Parser) parseHeadersFrame(header http2.FrameHeader, data []byte) (*types.HTTPRequest, error) {
+// parseHeadersFrame 解析HEADERS帧
+func (p *HTTP2Parser) parseHeadersFrame(connectionID string, header http2.FrameHeader, data []byte) (*types.HTTPRequest, error) {
 	if header.StreamID == 0 {
 		return nil, errors.New("HEADERS frame with stream ID 0")
 	}
 
 	// 获取或创建流
-	stream := p.getOrCreateStream("default", header.StreamID)
+	stream := p.getOrCreateStream(connectionID, header.StreamID)
 
 	// 检查流状态
 	if stream.AwaitingContinuation {
@@ -275,7 +275,7 @@ func (p *HTTP2Parser) parseHeadersFrame(header http2.FrameHeader, data []byte) (
 }
 
 // parseDataFrame 解析DATA帧
-func (p *HTTP2Parser) parseDataFrame(header http2.FrameHeader, data []byte) (*types.HTTPRequest, error) {
+func (p *HTTP2Parser) parseDataFrame(connectionID string, header http2.FrameHeader, data []byte) (*types.HTTPRequest, error) {
 	if header.StreamID == 0 {
 		return nil, errors.New("DATA frame with stream ID 0")
 	}
@@ -297,16 +297,24 @@ func (p *HTTP2Parser) parseDataFrame(header http2.FrameHeader, data []byte) (*ty
 		data = data[offset:]
 	}
 
-	// 创建包含数据的请求片段
-	request := &types.HTTPRequest{
-		Body:      data,
-		Timestamp: time.Now(),
-		StreamID:  &header.StreamID,
-		Complete:  header.Flags&http2.FlagDataEndStream != 0,
-		RawData:   data,
+	// 获取或创建流
+	stream := p.getOrCreateStream(connectionID, header.StreamID)
+
+	// 累积数据片段
+	if len(data) > 0 {
+		stream.DataFragments = append(stream.DataFragments, data)
+		stream.TotalDataLength += int64(len(data))
 	}
 
-	return request, nil
+	// 检查是否结束流
+	stream.EndStream = header.Flags&http2.FlagDataEndStream != 0
+
+	// 如果流结束或者这是唯一的数据帧，构建完整的请求
+	if stream.EndStream {
+		return p.buildDataRequest(stream)
+	}
+
+	return nil, nil
 }
 
 // parseSettingsFrame 解析SETTINGS帧
@@ -337,14 +345,14 @@ func (p *HTTP2Parser) parseSettingsFrame(header http2.FrameHeader, data []byte) 
 	return nil, nil
 }
 
-// parseContinuationFrame 解析CONTINUATION帧（支持分片重组）
-func (p *HTTP2Parser) parseContinuationFrame(header http2.FrameHeader, data []byte) (*types.HTTPRequest, error) {
+// parseContinuationFrame 解析CONTINUATION帧
+func (p *HTTP2Parser) parseContinuationFrame(connectionID string, header http2.FrameHeader, data []byte) (*types.HTTPRequest, error) {
 	if header.StreamID == 0 {
 		return nil, errors.New("CONTINUATION frame with stream ID 0")
 	}
 
 	// 获取流
-	stream := p.getOrCreateStream("default", header.StreamID)
+	stream := p.getOrCreateStream(connectionID, header.StreamID)
 
 	// 检查流状态
 	if !stream.AwaitingContinuation {
@@ -443,8 +451,8 @@ func (p *HTTP2Parser) decodeCompleteHeaders(stream *HTTP2Stream) (*types.HTTPReq
 	return request, nil
 }
 
-// parseFramesForResponse 解析响应帧
-func (p *HTTP2Parser) parseFramesForResponse(data []byte) (*types.HTTPResponse, error) {
+// parseFramesForResponse 解析HTTP/2响应帧
+func (p *HTTP2Parser) parseFramesForResponse(connectionID string, data []byte) (*types.HTTPResponse, error) {
 	offset := 0
 	var response *types.HTTPResponse
 
@@ -464,7 +472,7 @@ func (p *HTTP2Parser) parseFramesForResponse(data []byte) (*types.HTTPResponse, 
 		}
 
 		frameData := data[offset+9 : frameEnd]
-		resp, err := p.parseResponseFrame(header, frameData)
+		resp, err := p.parseResponseFrame(connectionID, header, frameData)
 		if err != nil {
 			return nil, err
 		}
@@ -480,19 +488,19 @@ func (p *HTTP2Parser) parseFramesForResponse(data []byte) (*types.HTTPResponse, 
 }
 
 // parseResponseFrame 解析响应帧
-func (p *HTTP2Parser) parseResponseFrame(header http2.FrameHeader, data []byte) (*types.HTTPResponse, error) {
+func (p *HTTP2Parser) parseResponseFrame(connectionID string, header http2.FrameHeader, data []byte) (*types.HTTPResponse, error) {
 	switch header.Type {
 	case http2.FrameHeaders:
-		return p.parseResponseHeadersFrame(header, data)
+		return p.parseResponseHeadersFrame(connectionID, header, data)
 	case http2.FrameData:
-		return p.parseResponseDataFrame(header, data)
+		return p.parseResponseDataFrame(connectionID, header, data)
 	default:
 		return nil, nil
 	}
 }
 
-// parseResponseHeadersFrame 解析响应HEADERS帧
-func (p *HTTP2Parser) parseResponseHeadersFrame(header http2.FrameHeader, data []byte) (*types.HTTPResponse, error) {
+// parseResponseHeadersFrame 解析响应HEADERS帧（带连接ID）
+func (p *HTTP2Parser) parseResponseHeadersFrame(connectionID string, header http2.FrameHeader, data []byte) (*types.HTTPResponse, error) {
 	if header.StreamID == 0 {
 		return nil, errors.New("response HEADERS frame with stream ID 0")
 	}
@@ -569,7 +577,7 @@ func (p *HTTP2Parser) parseResponseHeadersFrame(header http2.FrameHeader, data [
 }
 
 // parseResponseDataFrame 解析响应DATA帧
-func (p *HTTP2Parser) parseResponseDataFrame(header http2.FrameHeader, data []byte) (*types.HTTPResponse, error) {
+func (p *HTTP2Parser) parseResponseDataFrame(connectionID string, header http2.FrameHeader, data []byte) (*types.HTTPResponse, error) {
 	if header.StreamID == 0 {
 		return nil, errors.New("response DATA frame with stream ID 0")
 	}
@@ -738,7 +746,7 @@ func (p *HTTP2Parser) ParseAllRequests(data []byte) ([]*types.HTTPRequest, error
 		}
 
 		frameData := data[offset+9 : frameEnd]
-		req, err := p.parseFrame(header, frameData)
+		req, err := p.parseFrame("unknown", header, frameData)
 		if err != nil {
 			return requests, err
 		}
@@ -774,7 +782,7 @@ func (p *HTTP2Parser) ParseAllResponses(data []byte) ([]*types.HTTPResponse, err
 		}
 
 		frameData := data[offset+9 : frameEnd]
-		resp, err := p.parseResponseFrame(header, frameData)
+		resp, err := p.parseResponseFrame("unknown", header, frameData)
 		if err != nil {
 			return responses, err
 		}

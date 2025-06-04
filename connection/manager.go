@@ -502,7 +502,7 @@ func (m *Manager) parseHTTP2Messages(conn *Connection, data []byte) error {
 			}
 		} else {
 			// 回退到单流解析
-			if request, err := conn.Parser.ParseRequest(data); err == nil {
+			if request, err := conn.Parser.ParseRequest(conn.ID, data); err == nil {
 				return m.handleParsedRequest(conn, request)
 			}
 		}
@@ -525,7 +525,7 @@ func (m *Manager) parseHTTP2Messages(conn *Connection, data []byte) error {
 			}
 		} else {
 			// 回退到单流解析
-			if response, err := conn.Parser.ParseResponse(data); err == nil {
+			if response, err := conn.Parser.ParseResponse(conn.ID, data); err == nil {
 				return m.handleParsedResponse(conn, response)
 			}
 		}
@@ -535,7 +535,7 @@ func (m *Manager) parseHTTP2Messages(conn *Connection, data []byte) error {
 
 // parseRequestMessage 解析请求消息
 func (m *Manager) parseRequestMessage(conn *Connection, data []byte, isComplete, looksLikeHTTP bool) error {
-	if request, err := conn.Parser.ParseRequest(data); err == nil {
+	if request, err := conn.Parser.ParseRequest(conn.ID, data); err == nil {
 		return m.handleParsedRequest(conn, request)
 	} else if isComplete || looksLikeHTTP {
 		if m.callbacks != nil && m.callbacks.OnError != nil {
@@ -548,7 +548,7 @@ func (m *Manager) parseRequestMessage(conn *Connection, data []byte, isComplete,
 
 // parseResponseMessage 解析响应消息
 func (m *Manager) parseResponseMessage(conn *Connection, data []byte, isComplete, looksLikeHTTP bool) error {
-	if response, err := conn.Parser.ParseResponse(data); err == nil {
+	if response, err := conn.Parser.ParseResponse(conn.ID, data); err == nil {
 		return m.handleParsedResponse(conn, response)
 	} else if isComplete || looksLikeHTTP {
 		if m.callbacks != nil && m.callbacks.OnError != nil {

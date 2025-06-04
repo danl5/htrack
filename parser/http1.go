@@ -30,7 +30,7 @@ func NewHTTP1ParserWithVersion(version types.HTTPVersion) *HTTP1Parser {
 }
 
 // ParseRequest 解析HTTP请求
-func (p *HTTP1Parser) ParseRequest(data []byte) (*types.HTTPRequest, error) {
+func (p *HTTP1Parser) ParseRequest(connectionID string, data []byte) (*types.HTTPRequest, error) {
 	if len(data) == 0 {
 		return nil, errors.New("empty data")
 	}
@@ -113,7 +113,7 @@ func (p *HTTP1Parser) ParseRequest(data []byte) (*types.HTTPRequest, error) {
 }
 
 // ParseResponse 解析HTTP响应
-func (p *HTTP1Parser) ParseResponse(data []byte) (*types.HTTPResponse, error) {
+func (p *HTTP1Parser) ParseResponse(connectionID string, data []byte) (*types.HTTPResponse, error) {
 	if len(data) == 0 {
 		return nil, errors.New("empty data")
 	}
