@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/danl5/htrack/parser/http2"
@@ -17,20 +18,66 @@ import (
 
 // HTTP2Parser HTTP/2解析器
 type HTTP2Parser struct {
-	version      types.HTTPVersion
-	hpackDecoder *hpack.Decoder
-	connections  map[string]*HTTP2Connection
-	settings     http2.SettingsMap
+	version        types.HTTPVersion
+	connections    map[string]*HTTP2Connection
+	connectionsMux sync.RWMutex
+	settings       http2.SettingsMap
 }
 
 // HTTP2Connection HTTP/2连接状态
 type HTTP2Connection struct {
 	ID           string
-	Streams      map[uint32]*HTTP2Stream
+	streams      map[uint32]*HTTP2Stream
+	streamsMux   sync.RWMutex
 	Settings     http2.SettingsMap
 	PeerSettings http2.SettingsMap
 	LastStreamID uint32
 	GoAway       bool
+	hpackDecoder *hpack.Decoder
+}
+
+// GetConnection 安全地获取连接
+func (p *HTTP2Parser) GetConnection(connectionID string) (*HTTP2Connection, bool) {
+	p.connectionsMux.RLock()
+	defer p.connectionsMux.RUnlock()
+	conn, ok := p.connections[connectionID]
+	return conn, ok
+}
+
+// SetConnection 安全地设置连接
+func (p *HTTP2Parser) SetConnection(connectionID string, conn *HTTP2Connection) {
+	p.connectionsMux.Lock()
+	defer p.connectionsMux.Unlock()
+	p.connections[connectionID] = conn
+}
+
+// DeleteConnection 安全地删除连接
+func (p *HTTP2Parser) DeleteConnection(connectionID string) {
+	p.connectionsMux.Lock()
+	defer p.connectionsMux.Unlock()
+	delete(p.connections, connectionID)
+}
+
+// GetStream 安全地获取流
+func (c *HTTP2Connection) GetStream(streamID uint32) (*HTTP2Stream, bool) {
+	c.streamsMux.RLock()
+	defer c.streamsMux.RUnlock()
+	stream, ok := c.streams[streamID]
+	return stream, ok
+}
+
+// SetStream 安全地设置流
+func (c *HTTP2Connection) SetStream(streamID uint32, stream *HTTP2Stream) {
+	c.streamsMux.Lock()
+	defer c.streamsMux.Unlock()
+	c.streams[streamID] = stream
+}
+
+// DeleteStream 安全地删除流
+func (c *HTTP2Connection) DeleteStream(streamID uint32) {
+	c.streamsMux.Lock()
+	defer c.streamsMux.Unlock()
+	delete(c.streams, streamID)
 }
 
 // HTTP2Stream HTTP/2流状态
@@ -56,32 +103,32 @@ type HTTP2Stream struct {
 // NewHTTP2Parser 创建HTTP/2解析器
 func NewHTTP2Parser() *HTTP2Parser {
 	return &HTTP2Parser{
-		version:      types.HTTP2,
-		hpackDecoder: hpack.NewDecoder(4096, nil),
-		connections:  make(map[string]*HTTP2Connection),
-		settings:     http2.NewDefaultSettings(),
+		version:     types.HTTP2,
+		connections: make(map[string]*HTTP2Connection),
+		settings:    http2.NewDefaultSettings(),
 	}
 }
 
 // getOrCreateStream 获取或创建流
 func (p *HTTP2Parser) getOrCreateStream(connID string, streamID uint32) *HTTP2Stream {
-	conn, exists := p.connections[connID]
+	conn, exists := p.GetConnection(connID)
 	if !exists {
 		conn = &HTTP2Connection{
-			ID:      connID,
-			Streams: make(map[uint32]*HTTP2Stream),
+			ID:           connID,
+			streams:      make(map[uint32]*HTTP2Stream),
+			hpackDecoder: hpack.NewDecoder(4096, nil),
 		}
-		p.connections[connID] = conn
+		p.SetConnection(connID, conn)
 	}
 
-	stream, exists := conn.Streams[streamID]
+	stream, exists := conn.GetStream(streamID)
 	if !exists {
 		stream = &HTTP2Stream{
 			ID:        streamID,
 			CreatedAt: time.Now(),
 			Headers:   make(http.Header),
 		}
-		conn.Streams[streamID] = stream
+		conn.SetStream(streamID, stream)
 	}
 
 	return stream
@@ -271,7 +318,7 @@ func (p *HTTP2Parser) parseHeadersFrame(connectionID string, header http2.FrameH
 	}
 
 	// 头部完整，进行解码
-	return p.decodeCompleteHeaders(stream)
+	return p.decodeCompleteHeaders(connectionID, stream)
 }
 
 // parseDataFrame 解析DATA帧
@@ -370,11 +417,17 @@ func (p *HTTP2Parser) parseContinuationFrame(connectionID string, header http2.F
 
 	// 头部完整，进行解码
 	stream.AwaitingContinuation = false
-	return p.decodeCompleteHeaders(stream)
+	return p.decodeCompleteHeaders(connectionID, stream)
 }
 
 // decodeCompleteHeaders 解码完整的头部块序列
-func (p *HTTP2Parser) decodeCompleteHeaders(stream *HTTP2Stream) (*types.HTTPRequest, error) {
+func (p *HTTP2Parser) decodeCompleteHeaders(connectionID string, stream *HTTP2Stream) (*types.HTTPRequest, error) {
+	// 获取连接以访问其hpack decoder
+	conn, exists := p.GetConnection(connectionID)
+	if !exists {
+		return nil, errors.New("connection not found")
+	}
+
 	// 合并所有头部块
 	var completeHeaderBlock []byte
 	for _, block := range stream.HeaderBlocks {
@@ -382,7 +435,7 @@ func (p *HTTP2Parser) decodeCompleteHeaders(stream *HTTP2Stream) (*types.HTTPReq
 	}
 
 	// 解码头部块
-	headerFields, err := p.hpackDecoder.DecodeFull(completeHeaderBlock)
+	headerFields, err := conn.hpackDecoder.DecodeFull(completeHeaderBlock)
 	if err != nil {
 		return nil, fmt.Errorf("HPACK decode error: %v", err)
 	}
@@ -530,7 +583,16 @@ func (p *HTTP2Parser) parseResponseHeadersFrame(connectionID string, header http
 	}
 
 	// 解码头部块
-	headerFields, err := p.hpackDecoder.DecodeFull(data)
+	// 获取连接
+	connection, ok := p.GetConnection(connectionID)
+	if !ok {
+		// 通常，在解析响应头之前，连接应该已经存在
+		// 但为了健壮性，我们创建一个新的（如果需要）或返回错误
+		// 这里假设 getOrCreateStream 已经处理了连接的创建和 hpackDecoder 的初始化
+		// 或者我们可以选择在这里返回一个错误，指示连接未找到
+		return nil, fmt.Errorf("connection not found for ID: %s", connectionID)
+	}
+	headerFields, err := connection.hpackDecoder.DecodeFull(data)
 	if err != nil {
 		return nil, fmt.Errorf("HPACK decode error: %v", err)
 	}
