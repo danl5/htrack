@@ -35,10 +35,20 @@ func (p *HTTP1Parser) ParseRequest(connectionID string, data []byte) (*types.HTT
 		return nil, errors.New("empty data")
 	}
 
-	// 查找请求头结束位置
-	headerEnd := bytes.Index(data, []byte("\r\n\r\n"))
+	// 安全检查：限制数据大小
+	if len(data) > 10*1024*1024 { // 10MB限制
+		return nil, errors.New("request too large")
+	}
+
+	// 查找请求头结束位置，支持多种换行符
+	headerEnd := findHeaderEnd(data)
 	if headerEnd == -1 {
 		return nil, errors.New("incomplete request headers")
+	}
+
+	// 安全检查：限制头部大小
+	if headerEnd > 64*1024 { // 64KB头部限制
+		return nil, errors.New("request headers too large")
 	}
 
 	// 分离头部和体部
@@ -46,9 +56,14 @@ func (p *HTTP1Parser) ParseRequest(connectionID string, data []byte) (*types.HTT
 	bodyData := data[headerEnd+4:]
 
 	// 解析请求行
-	lines := bytes.Split(headerData, []byte("\r\n"))
+	lines := splitHeaderLines(headerData)
 	if len(lines) == 0 {
 		return nil, errors.New("no request line found")
+	}
+
+	// 安全检查：限制头部字段数量
+	if len(lines) > 100 { // 最多100个头部字段
+		return nil, errors.New("too many header fields")
 	}
 
 	method, path, proto, err := ParseRequestLine(lines[0])
@@ -70,10 +85,16 @@ func (p *HTTP1Parser) ParseRequest(connectionID string, data []byte) (*types.HTT
 
 	// 解析请求头
 	headers := make(http.Header)
+	headerCount := 0
 	for i := 1; i < len(lines); i++ {
 		line := lines[i]
 		if len(line) == 0 {
 			continue
+		}
+
+		// 安全检查：限制单个头部字段长度
+		if len(line) > 8192 { // 8KB单个头部限制
+			return nil, errors.New("header field too long")
 		}
 
 		colonIdx := bytes.IndexByte(line, ':')
@@ -83,7 +104,19 @@ func (p *HTTP1Parser) ParseRequest(connectionID string, data []byte) (*types.HTT
 
 		key := string(bytes.TrimSpace(line[:colonIdx]))
 		value := string(bytes.TrimSpace(line[colonIdx+1:]))
+
+		// 验证头部字段名
+		if !isValidHeaderName(key) {
+			continue
+		}
+
 		headers.Add(key, value)
+		headerCount++
+
+		// 安全检查：限制实际头部字段数量
+		if headerCount > 50 {
+			return nil, errors.New("too many valid header fields")
+		}
 	}
 
 	// 获取内容长度
@@ -118,10 +151,20 @@ func (p *HTTP1Parser) ParseResponse(connectionID string, data []byte) (*types.HT
 		return nil, errors.New("empty data")
 	}
 
-	// 查找响应头结束位置
-	headerEnd := bytes.Index(data, []byte("\r\n\r\n"))
+	// 安全检查：限制数据大小
+	if len(data) > 10*1024*1024 { // 10MB限制
+		return nil, errors.New("response too large")
+	}
+
+	// 查找响应头结束位置，支持多种换行符
+	headerEnd := findHeaderEnd(data)
 	if headerEnd == -1 {
 		return nil, errors.New("incomplete response headers")
+	}
+
+	// 安全检查：限制头部大小
+	if headerEnd > 64*1024 { // 64KB头部限制
+		return nil, errors.New("response headers too large")
 	}
 
 	// 分离头部和体部
@@ -129,9 +172,14 @@ func (p *HTTP1Parser) ParseResponse(connectionID string, data []byte) (*types.HT
 	bodyData := data[headerEnd+4:]
 
 	// 解析状态行
-	lines := bytes.Split(headerData, []byte("\r\n"))
+	lines := splitHeaderLines(headerData)
 	if len(lines) == 0 {
 		return nil, errors.New("no status line found")
+	}
+
+	// 安全检查：限制头部字段数量
+	if len(lines) > 100 { // 最多100个头部字段
+		return nil, errors.New("too many header fields")
 	}
 
 	proto, statusCode, status, err := ParseStatusLine(lines[0])
@@ -147,10 +195,16 @@ func (p *HTTP1Parser) ParseResponse(connectionID string, data []byte) (*types.HT
 
 	// 解析响应头
 	headers := make(http.Header)
+	headerCount := 0
 	for i := 1; i < len(lines); i++ {
 		line := lines[i]
 		if len(line) == 0 {
 			continue
+		}
+
+		// 安全检查：限制单个头部字段长度
+		if len(line) > 8192 { // 8KB单个头部限制
+			return nil, errors.New("header field too long")
 		}
 
 		colonIdx := bytes.IndexByte(line, ':')
@@ -160,7 +214,19 @@ func (p *HTTP1Parser) ParseResponse(connectionID string, data []byte) (*types.HT
 
 		key := string(bytes.TrimSpace(line[:colonIdx]))
 		value := string(bytes.TrimSpace(line[colonIdx+1:]))
+
+		// 验证头部字段名
+		if !isValidHeaderName(key) {
+			continue
+		}
+
 		headers.Add(key, value)
+		headerCount++
+
+		// 安全检查：限制实际头部字段数量
+		if headerCount > 50 {
+			return nil, errors.New("too many valid header fields")
+		}
 	}
 
 	// 获取内容长度
@@ -240,7 +306,7 @@ func (p *HTTP1Parser) DetectVersion(data []byte) types.HTTPVersion {
 // IsComplete 检查消息是否完整
 func (p *HTTP1Parser) IsComplete(data []byte) bool {
 	// 查找头部结束
-	headerEnd := bytes.Index(data, []byte("\r\n\r\n"))
+	headerEnd := findHeaderEnd(data)
 	if headerEnd == -1 {
 		return false
 	}
@@ -271,7 +337,7 @@ func (p *HTTP1Parser) IsComplete(data []byte) bool {
 // GetRequiredBytes 获取需要的字节数
 func (p *HTTP1Parser) GetRequiredBytes(data []byte) int {
 	// 查找头部结束
-	headerEnd := bytes.Index(data, []byte("\r\n\r\n"))
+	headerEnd := findHeaderEnd(data)
 	if headerEnd == -1 {
 		return -1 // 需要更多数据来完成头部
 	}
@@ -328,6 +394,11 @@ func parseProtocolVersion(proto string) (int, int, error) {
 
 // parseRequestBody 解析请求体
 func (p *HTTP1Parser) parseRequestBody(request *types.HTTPRequest, bodyData []byte) error {
+	// 检查是否使用分块编码
+	if IsChunkedEncoding(request.Headers) {
+		return p.parseChunkedRequestBody(request, bodyData)
+	}
+
 	if request.ContentLength == 0 {
 		// 没有请求体
 		request.Complete = true
@@ -347,12 +418,8 @@ func (p *HTTP1Parser) parseRequestBody(request *types.HTTPRequest, bodyData []by
 		return nil
 	}
 
-	// 检查是否使用分块编码
-	if IsChunkedEncoding(request.Headers) {
-		return p.parseChunkedRequestBody(request, bodyData)
-	}
-
-	// 没有Content-Length且不是分块编码，可能是GET请求
+	// ContentLength为-1，没有Content-Length头部且不是分块编码
+	// 对于请求来说，通常意味着没有请求体（如GET请求）
 	request.Complete = true
 	return nil
 }
@@ -436,10 +503,17 @@ func (p *HTTP1Parser) parseChunkedData(data []byte) (body []byte, chunks [][]byt
 	var bodyBuffer bytes.Buffer
 	chunks = make([][]byte, 0)
 	offset := 0
+	maxChunks := 1000                       // 限制最大块数量
+	maxBodySize := int64(100 * 1024 * 1024) // 100MB限制
 
 	for offset < len(data) {
-		// 查找块大小行的结束
-		crlfIdx := bytes.Index(data[offset:], []byte("\r\n"))
+		// 安全检查：限制块数量
+		if len(chunks) >= maxChunks {
+			return nil, nil, false, errors.New("too many chunks")
+		}
+
+		// 查找块大小行的结束，支持多种换行符
+		crlfIdx := findLineEnd(data[offset:])
 		if crlfIdx == -1 {
 			// 数据不完整
 			return bodyBuffer.Bytes(), chunks, false, nil
@@ -452,26 +526,36 @@ func (p *HTTP1Parser) parseChunkedData(data []byte) (body []byte, chunks [][]byt
 			return nil, nil, false, err
 		}
 
-		offset += crlfIdx + 2 // 跳过CRLF
+		// 安全检查：限制单个块大小
+		if chunkSize > 10*1024*1024 { // 10MB单块限制
+			return nil, nil, false, errors.New("chunk too large")
+		}
+
+		// 安全检查：限制总体大小
+		if int64(bodyBuffer.Len())+chunkSize > maxBodySize {
+			return nil, nil, false, errors.New("chunked body too large")
+		}
+
+		lineEndSize := getLineEndSize(data[offset+crlfIdx:])
+		offset += crlfIdx + lineEndSize
 
 		if chunkSize == 0 {
-			// 最后一个块
-			// 查找尾部头结束
-			trailerEnd := bytes.Index(data[offset:], []byte("\r\n\r\n"))
+			// 最后一个块，解析trailer headers
+			trailerHeaders, trailerEnd := parseTrailerHeaders(data[offset:])
 			if trailerEnd == -1 {
 				// 尾部头不完整
 				return bodyBuffer.Bytes(), chunks, false, nil
 			}
 
-			// 解析尾部头（如果需要的话）
-			// 这里简化处理，直接跳过
+			// 可以在这里处理trailer headers（如果需要的话）
+			_ = trailerHeaders
 
 			return bodyBuffer.Bytes(), chunks, true, nil
 		}
 
-		// 检查是否有足够的数据读取块内容
+		// 检查是否有足够的数据读取块内容和后续的CRLF
 		if offset+int(chunkSize)+2 > len(data) {
-			// 数据不完整
+			// 数据不完整（包括块数据和后续CRLF）
 			return bodyBuffer.Bytes(), chunks, false, nil
 		}
 
@@ -480,7 +564,15 @@ func (p *HTTP1Parser) parseChunkedData(data []byte) (body []byte, chunks [][]byt
 		bodyBuffer.Write(chunkData)
 		chunks = append(chunks, chunkData)
 
-		offset += int(chunkSize) + 2 // 跳过块数据和CRLF
+		offset += int(chunkSize)
+
+		// 跳过块后的CRLF
+		lineEnd := findLineEnd(data[offset:])
+		if lineEnd == -1 {
+			// 缺少CRLF，数据不完整
+			return bodyBuffer.Bytes(), chunks, false, nil
+		}
+		offset += lineEnd + getLineEndSize(data[offset+lineEnd:])
 	}
 
 	return bodyBuffer.Bytes(), chunks, false, nil
@@ -501,4 +593,88 @@ func parseHTTPVersion(versionStr string) types.HTTPVersion {
 	default:
 		return types.Unknown
 	}
+}
+
+// findLineEnd 查找行结束位置
+func findLineEnd(data []byte) int {
+	if idx := bytes.Index(data, []byte("\r\n")); idx != -1 {
+		return idx
+	}
+	if idx := bytes.IndexByte(data, '\n'); idx != -1 {
+		return idx
+	}
+	return -1
+}
+
+// getLineEndSize 获取行结束符的大小
+func getLineEndSize(data []byte) int {
+	if len(data) >= 2 && data[0] == '\r' && data[1] == '\n' {
+		return 2
+	}
+	if len(data) >= 1 && data[0] == '\n' {
+		return 1
+	}
+	return 0
+}
+
+// parseTrailerHeaders 解析trailer headers
+func parseTrailerHeaders(data []byte) (http.Header, int) {
+	headers := make(http.Header)
+
+	// 对于空trailer，只需要检查是否有单个换行符
+	if len(data) >= 2 && data[0] == '\r' && data[1] == '\n' {
+		// 检查是否是空trailer（只有\r\n）
+		if len(data) == 2 || (len(data) > 2 && data[2] != '\r' && data[2] != '\n') {
+			// 这是空trailer的结束
+			return headers, 2
+		}
+	} else if len(data) >= 1 && data[0] == '\n' {
+		// 检查是否是空trailer（只有\n）
+		if len(data) == 1 || (len(data) > 1 && data[1] != '\n') {
+			// 这是空trailer的结束
+			return headers, 1
+		}
+	}
+
+	// 查找trailer headers的结束（双换行符）
+	trailerEnd := findHeaderEnd(data)
+	if trailerEnd == -1 {
+		return headers, -1 // 数据不完整
+	}
+
+	if trailerEnd == 0 {
+		// 没有trailer headers，只有双换行符
+		// 需要跳过这个双换行符
+		if len(data) >= 2 && data[0] == '\r' && data[1] == '\n' {
+			return headers, 2
+		} else if len(data) >= 1 && data[0] == '\n' {
+			return headers, 1
+		}
+		return headers, 0
+	}
+
+	// 解析trailer headers
+	trailerData := data[:trailerEnd]
+	lines := splitHeaderLines(trailerData)
+
+	for _, line := range lines {
+		if len(line) == 0 {
+			continue
+		}
+
+		colonIdx := bytes.IndexByte(line, ':')
+		if colonIdx == -1 {
+			continue
+		}
+
+		key := string(bytes.TrimSpace(line[:colonIdx]))
+		value := string(bytes.TrimSpace(line[colonIdx+1:]))
+
+		if isValidHeaderName(key) {
+			headers.Add(key, value)
+		}
+	}
+
+	// 返回trailer headers结束位置加上双换行符的长度
+	return headers, trailerEnd + getLineEndSize(data[trailerEnd:])
 }

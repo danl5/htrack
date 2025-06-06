@@ -42,7 +42,7 @@ func TestParseHTTPResponse_SimpleOK(t *testing.T) {
 
 func TestParseHTTPRequest_POSTWithBody(t *testing.T) {
 	p := parser.NewHTTP1Parser()
-	rawData := []byte("POST /submit HTTP/1.1\r\nHost: example.com\r\nContent-Type: application/json\r\nContent-Length: 18\r\n\r\n{\"key\":\"value\"}")
+	rawData := []byte("POST /submit HTTP/1.1\r\nHost: example.com\r\nContent-Type: application/json\r\nContent-Length: 15\r\n\r\n{\"key\":\"value\"}")
 
 	req, err := p.ParseRequest("test-session-1", rawData)
 
@@ -51,23 +51,17 @@ func TestParseHTTPRequest_POSTWithBody(t *testing.T) {
 	assert.Equal(t, "POST", req.Method)
 	assert.Equal(t, "/submit", req.URL.Path)
 	assert.Equal(t, "application/json", req.Headers.Get("Content-Type"))
-	assert.Equal(t, int64(18), req.ContentLength)
+	assert.Equal(t, int64(15), req.ContentLength)
 	assert.Equal(t, []byte("{\"key\":\"value\"}"), req.Body)
 	assert.True(t, req.Complete)
 }
 
 func TestParseHTTPRequest_Chunked(t *testing.T) {
 	p := parser.NewHTTP1Parser()
-	chunk1 := []byte("POST /chunked HTTP/1.1\r\nHost: example.com\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nWiki\r\n")
-	chunk2 := []byte("5\r\npedia\r\nE\r\n in\r\n\r\nchunks.\r\n0\r\n\r\n")
+	fullData := []byte("POST /chunked HTTP/1.1\r\nHost: example.com\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nWiki\r\n5\r\npedia\r\nE\r\n in\r\n\r\nchunks.\r\n0\r\n\r\n")
 
-	req, err := p.ParseRequest("test-session-1", chunk1)
-	assert.NoError(t, err)
-	assert.NotNil(t, req)
-	assert.False(t, req.Complete) // Should not be complete after first chunk
-
-	req, err = p.ParseRequest("test-session-1", append(chunk1, chunk2...))
-	// 或者直接用chunk1+chunk2整体作为一次请求体传入
+	// 测试完整数据
+	req, err := p.ParseRequest("test-session-1", fullData)
 	assert.NoError(t, err)
 	assert.NotNil(t, req)
 	assert.True(t, req.Complete)

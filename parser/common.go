@@ -289,21 +289,37 @@ func (pb *PacketBuffer) reassemble() error {
 func ParseHTTPHeaders(data []byte) (http.Header, int, error) {
 	headers := make(http.Header)
 
-	// 查找头部结束位置
-	headerEnd := bytes.Index(data, []byte("\r\n\r\n"))
+	// 查找头部结束位置，支持多种换行符
+	headerEnd := findHeaderEnd(data)
 	if headerEnd == -1 {
 		return nil, 0, errors.New("incomplete headers")
 	}
 
+	// 安全检查：限制头部大小
+	if headerEnd > 64*1024 { // 64KB头部限制
+		return nil, 0, errors.New("headers too large")
+	}
+
 	// 分割头部行
 	headerData := data[:headerEnd]
-	lines := bytes.Split(headerData, []byte("\r\n"))
+	lines := splitHeaderLines(headerData)
 
+	// 安全检查：限制头部字段数量
+	if len(lines) > 100 {
+		return nil, 0, errors.New("too many header lines")
+	}
+
+	headerCount := 0
 	// 跳过第一行（请求行或状态行）
 	for i := 1; i < len(lines); i++ {
 		line := lines[i]
 		if len(line) == 0 {
 			continue
+		}
+
+		// 安全检查：限制单个头部字段长度
+		if len(line) > 8192 { // 8KB单个头部限制
+			return nil, 0, errors.New("header field too long")
 		}
 
 		// 查找冒号
@@ -315,10 +331,27 @@ func ParseHTTPHeaders(data []byte) (http.Header, int, error) {
 		key := string(bytes.TrimSpace(line[:colonIdx]))
 		value := string(bytes.TrimSpace(line[colonIdx+1:]))
 
+		// 验证头部字段名
+		if !isValidHeaderName(key) {
+			continue
+		}
+
 		headers.Add(key, value)
+		headerCount++
+
+		// 安全检查：限制实际头部字段数量
+		if headerCount > 50 {
+			return nil, 0, errors.New("too many valid header fields")
+		}
 	}
 
-	return headers, headerEnd + 4, nil
+	// 计算头部结束后的偏移量
+	headerEndSize := 4 // 默认\r\n\r\n
+	if bytes.Contains(data[:headerEnd+4], []byte("\n\n")) && !bytes.Contains(data[:headerEnd+4], []byte("\r\n\r\n")) {
+		headerEndSize = 2 // \n\n
+	}
+
+	return headers, headerEnd + headerEndSize, nil
 }
 
 // ParseRequestLine 解析请求行
@@ -381,9 +414,12 @@ func ParseStatusLine(line []byte) (proto string, statusCode int, status string, 
 
 // isValidHTTPMethod 检查是否是有效的HTTP方法
 func isValidHTTPMethod(method string) bool {
+	// 标准HTTP方法和常见扩展方法（包括WebDAV）
 	validMethods := []string{
 		"GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS",
 		"PATCH", "TRACE", "CONNECT",
+		// WebDAV方法
+		"PROPFIND", "PROPPATCH", "MKCOL", "COPY", "MOVE", "LOCK", "UNLOCK",
 	}
 
 	for _, valid := range validMethods {
@@ -439,4 +475,45 @@ func (pp *PacketProcessor) CleanupBuffers(maxAge time.Duration) {
 			delete(pp.buffers, connectionID)
 		}
 	}
+}
+
+// findHeaderEnd 查找头部结束位置，支持多种换行符
+func findHeaderEnd(data []byte) int {
+	// 首先尝试标准的\r\n\r\n
+	if idx := bytes.Index(data, []byte("\r\n\r\n")); idx != -1 {
+		return idx
+	}
+	// 尝试\n\n（某些非标准实现）
+	if idx := bytes.Index(data, []byte("\n\n")); idx != -1 {
+		return idx
+	}
+	return -1
+}
+
+// splitHeaderLines 分割头部行，支持多种换行符
+func splitHeaderLines(data []byte) [][]byte {
+	// 首先尝试\r\n分割
+	if bytes.Contains(data, []byte("\r\n")) {
+		return bytes.Split(data, []byte("\r\n"))
+	}
+	// 回退到\n分割
+	return bytes.Split(data, []byte("\n"))
+}
+
+// isValidHeaderName 验证头部字段名是否有效
+func isValidHeaderName(name string) bool {
+	if len(name) == 0 {
+		return false
+	}
+	// HTTP头部字段名只能包含可见ASCII字符，不能包含分隔符
+	for _, c := range []byte(name) {
+		if c <= 32 || c >= 127 ||
+			c == '(' || c == ')' || c == '<' || c == '>' || c == '@' ||
+			c == ',' || c == ';' || c == ':' || c == '\\' || c == '"' ||
+			c == '/' || c == '[' || c == ']' || c == '?' || c == '=' ||
+			c == '{' || c == '}' || c == ' ' || c == '\t' {
+			return false
+		}
+	}
+	return true
 }
