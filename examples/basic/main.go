@@ -15,9 +15,8 @@ func main() {
 
 	// 创建HTrack实例
 	config := &htrack.Config{
-		MaxConnections:     100,
+		MaxSessions:        10000,
 		MaxTransactions:    1000,
-		ConnectionTimeout:  10 * time.Minute,
 		TransactionTimeout: 2 * time.Minute,
 		BufferSize:         32 * 1024,
 		EnableHTTP1:        true,
@@ -150,34 +149,16 @@ func main() {
 	// 显示统计信息
 	fmt.Println("\n=== 统计信息 ===")
 	stats := ht.GetStatistics()
-	fmt.Printf("总连接数: %d\n", stats.TotalConnections)
-	fmt.Printf("活跃连接数: %d\n", stats.ActiveConnections)
 	fmt.Printf("总事务数: %d\n", stats.TotalTransactions)
 	fmt.Printf("活跃事务数: %d\n", stats.ActiveTransactions)
 	fmt.Printf("总请求数: %d\n", stats.TotalRequests)
 	fmt.Printf("总响应数: %d\n", stats.TotalResponses)
-	fmt.Printf("HTTP/1.x连接数: %d\n", stats.HTTP1Connections)
-	fmt.Printf("HTTP/2连接数: %d\n", stats.HTTP2Connections)
-
-	// 显示活跃连接
-	fmt.Println("\n=== 活跃连接 ===")
-	connections := ht.GetActiveConnections()
-	for _, conn := range connections {
-		fmt.Printf("连接ID: %s\n", conn.ID)
-		fmt.Printf("  版本: %v\n", conn.Version)
-		fmt.Printf("  状态: %v\n", conn.State)
-		fmt.Printf("  创建时间: %s\n", conn.CreatedAt.Format("15:04:05"))
-		fmt.Printf("  最后活动: %s\n", conn.LastActivity.Format("15:04:05"))
-		fmt.Printf("  事务数: %d\n", len(conn.Transactions))
-		fmt.Println()
-	}
 
 	// 显示活跃事务
 	fmt.Println("=== 活跃事务 ===")
 	transactions := ht.GetActiveTransactions()
 	for _, tx := range transactions {
 		fmt.Printf("事务ID: %s\n", tx.ID)
-		fmt.Printf("  连接ID: %s\n", tx.ConnectionID)
 		if tx.StreamID != nil {
 			fmt.Printf("  流ID: %d\n", *tx.StreamID)
 		}

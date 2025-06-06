@@ -12,9 +12,8 @@ import (
 func main() {
 	// 创建配置，启用channel输出
 	config := &htrack.Config{
-		MaxConnections:     100,
-		MaxTransactions:    1000,
-		ConnectionTimeout:  30 * time.Second,
+		MaxSessions:        10000,
+		MaxTransactions:    10000,
 		TransactionTimeout: 60 * time.Second,
 		BufferSize:         64 * 1024,
 		EnableHTTP1:        true,
@@ -62,13 +61,13 @@ func main() {
 	// 模拟处理HTTP/1.1请求
 	fmt.Println("处理HTTP/1.1数据包...")
 	httpRequest := "GET /api/users HTTP/1.1\r\nHost: example.com\r\nUser-Agent: TestClient/1.0\r\nContent-Length: 0\r\n\r\n"
-	err := ht.ProcessPacket("conn-1", []byte(httpRequest), types.DirectionRequest)
+	err := ht.ProcessPacket("session-1", []byte(httpRequest), types.DirectionRequest)
 	if err != nil {
 		log.Printf("处理请求失败: %v", err)
 	}
 
 	httpResponse := "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 13\r\n\r\n{\"status\":\"ok\"}"
-	err = ht.ProcessPacket("conn-1", []byte(httpResponse), types.DirectionResponse)
+	err = ht.ProcessPacket("session-1", []byte(httpResponse), types.DirectionResponse)
 	if err != nil {
 		log.Printf("处理响应失败: %v", err)
 	}
@@ -79,18 +78,18 @@ func main() {
 	// 模拟处理更多数据包
 	fmt.Println("\n处理更多HTTP数据包...")
 	for i := 0; i < 3; i++ {
-		connID := fmt.Sprintf("conn-%d", i+2)
+		sessionID := fmt.Sprintf("session-%d", i+2)
 
 		// 发送请求
 		request := fmt.Sprintf("POST /api/data/%d HTTP/1.1\r\nHost: api.example.com\r\nContent-Type: application/json\r\nContent-Length: 15\r\n\r\n{\"id\":%d,\"test\":1}", i, i)
-		err := ht.ProcessPacket(connID, []byte(request), types.DirectionRequest)
+		err := ht.ProcessPacket(sessionID, []byte(request), types.DirectionRequest)
 		if err != nil {
 			log.Printf("处理请求 %d 失败: %v", i, err)
 		}
 
 		// 发送响应
 		response := fmt.Sprintf("HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nLocation: /api/data/%d\r\nContent-Length: 22\r\n\r\n{\"id\":%d,\"created\":true}", i, i)
-		err = ht.ProcessPacket(connID, []byte(response), types.DirectionResponse)
+		err = ht.ProcessPacket(sessionID, []byte(response), types.DirectionResponse)
 		if err != nil {
 			log.Printf("处理响应 %d 失败: %v", i, err)
 		}

@@ -15,9 +15,9 @@ func main() {
 
 	// 创建HTrack实例
 	ht := htrack.New(&htrack.Config{
-		MaxConnections:     50,
+		MaxSessions:        500,
 		MaxTransactions:    500,
-		ConnectionTimeout:  5 * time.Minute,
+		SessionTimeout:     5 * time.Minute,
 		TransactionTimeout: 1 * time.Minute,
 		BufferSize:         64 * 1024,
 		EnableHTTP1:        true,
@@ -29,14 +29,8 @@ func main() {
 
 	// 设置详细的事件处理器
 	ht.SetEventHandlers(&htrack.EventHandlers{
-		OnConnectionCreated: func(connectionID string, version types.HTTPVersion) {
-			fmt.Printf("🔗 [连接建立] %s (%v)\n", connectionID, version)
-		},
-		OnConnectionClosed: func(connectionID string) {
-			fmt.Printf("❌ [连接关闭] %s\n", connectionID)
-		},
-		OnTransactionCreated: func(transactionID, connectionID string) {
-			fmt.Printf("📝 [事务开始] %s @ %s\n", transactionID, connectionID)
+		OnTransactionCreated: func(transactionID, sessionID string) {
+			fmt.Printf("📝 [事务开始] %s @ %s\n", transactionID, sessionID)
 		},
 		OnTransactionComplete: func(transactionID string, request *types.HTTPRequest, response *types.HTTPResponse) {
 			fmt.Printf("✅ [事务完成] %s\n", transactionID)
@@ -63,8 +57,8 @@ func main() {
 		},
 	})
 
-	// 示例1: HTTP/2连接前导和设置帧
-	fmt.Println("\n=== 示例1: HTTP/2连接建立 ===")
+	// 示例1: HTTP/2会话前导和设置帧
+	fmt.Println("\n=== 示例1: HTTP/2会话建立 ===")
 	http2Preface := []byte("PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")
 
 	// HTTP/2 SETTINGS帧
@@ -79,9 +73,9 @@ func main() {
 	}
 
 	http2ConnectionData := append(http2Preface, settingsFrame...)
-	err := ht.ProcessPacket("http2-conn-1", http2ConnectionData, types.DirectionRequest)
+	err := ht.ProcessPacket("http2-session-1", http2ConnectionData, types.DirectionRequest)
 	if err != nil {
-		log.Printf("处理HTTP/2连接数据失败: %v", err)
+		log.Printf("处理HTTP/2会话数据失败: %v", err)
 	}
 
 	// 示例2: HTTP/2 HEADERS帧（请求）
@@ -97,7 +91,7 @@ func main() {
 		0x07, ':', 's', 'c', 'h', 'e', 'm', 'e', 0x05, 'h', 't', 't', 'p', 's',
 	}
 
-	err = ht.ProcessPacket("http2-conn-1", headersFrame, types.DirectionRequest)
+	err = ht.ProcessPacket("http2-session-1", headersFrame, types.DirectionRequest)
 	if err != nil {
 		log.Printf("处理HTTP/2请求失败: %v", err)
 	}
@@ -125,15 +119,15 @@ func main() {
 	}
 
 	responseData := append(responseHeadersFrame, dataFrame...)
-	err = ht.ProcessPacket("http2-conn-1", responseData, types.DirectionResponse)
+	err = ht.ProcessPacket("http2-session-1", responseData, types.DirectionResponse)
 	if err != nil {
 		log.Printf("处理HTTP/2响应失败: %v", err)
 	}
 
-	// 示例4: 并发HTTP/1.1连接
-	fmt.Println("\n=== 示例4: 并发HTTP/1.1连接 ===")
+	// 示例4: 并发HTTP/1.1会话
+	fmt.Println("\n=== 示例4: 并发HTTP/1.1会话 ===")
 	for i := 1; i <= 3; i++ {
-		connID := fmt.Sprintf("http1-conn-%d", i)
+		sessionID := fmt.Sprintf("http1-session-%d", i)
 
 		// 并发发送请求
 		go func(id string, num int) {
@@ -165,7 +159,7 @@ func main() {
 			if err != nil {
 				log.Printf("处理并发响应%d失败: %v", num, err)
 			}
-		}(connID, i)
+		}(sessionID, i)
 	}
 
 	// 等待并发处理完成
@@ -186,7 +180,7 @@ func main() {
 			"0\r\n" +
 			"\r\n")
 
-	err = ht.ProcessPacket("upload-conn", chunkedRequest, types.DirectionRequest)
+	err = ht.ProcessPacket("upload-session", chunkedRequest, types.DirectionRequest)
 	if err != nil {
 		log.Printf("处理分块请求失败: %v", err)
 	}
@@ -201,7 +195,7 @@ func main() {
 			"0\r\n" +
 			"\r\n")
 
-	err = ht.ProcessPacket("upload-conn", chunkedResponse, types.DirectionResponse)
+	err = ht.ProcessPacket("upload-session", chunkedResponse, types.DirectionResponse)
 	if err != nil {
 		log.Printf("处理分块响应失败: %v", err)
 	}
@@ -238,33 +232,10 @@ func main() {
 	// 显示最终统计信息
 	fmt.Println("\n=== 最终统计信息 ===")
 	stats := ht.GetStatistics()
-	fmt.Printf("📊 总连接数: %d (HTTP/1.x: %d, HTTP/2: %d)\n",
-		stats.TotalConnections, stats.HTTP1Connections, stats.HTTP2Connections)
-	fmt.Printf("📊 活跃连接数: %d\n", stats.ActiveConnections)
 	fmt.Printf("📊 总事务数: %d (活跃: %d)\n", stats.TotalTransactions, stats.ActiveTransactions)
 	fmt.Printf("📊 请求/响应: %d/%d\n", stats.TotalRequests, stats.TotalResponses)
 	fmt.Printf("📊 错误数: %d\n", stats.ErrorCount)
 	fmt.Printf("📊 HTTP/2流数: %d\n", stats.HTTP2Streams)
-
-	// 显示连接详情
-	fmt.Println("\n=== 连接详情 ===")
-	connections := ht.GetActiveConnections()
-	for i, conn := range connections {
-		fmt.Printf("连接 %d:\n", i+1)
-		fmt.Printf("  ID: %s\n", conn.ID)
-		fmt.Printf("  版本: %v\n", conn.Version)
-		fmt.Printf("  状态: %v\n", conn.State)
-		fmt.Printf("  运行时间: %v\n", time.Since(conn.CreatedAt).Round(time.Millisecond))
-		fmt.Printf("  事务数: %d\n", len(conn.Transactions))
-
-		// 显示该连接的事务
-		for _, txID := range conn.Transactions {
-			if txInfo, err := ht.GetTransaction(txID); err == nil {
-				fmt.Printf("    事务 %s: %v\n", txID[:8], txInfo.State)
-			}
-		}
-		fmt.Println()
-	}
 
 	// 演示便捷函数
 	fmt.Println("=== 便捷函数演示 ===")

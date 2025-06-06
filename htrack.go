@@ -8,7 +8,7 @@ import (
 	"github.com/danl5/htrack/types"
 )
 
-// HTrack HTTP通信生命周期管理器
+// HTrack HTTP协议数据解析器
 type HTrack struct {
 	manager *connection.Manager
 	config  *Config
@@ -20,22 +20,22 @@ type HTrack struct {
 
 // Config HTrack配置
 type Config struct {
-	// 连接配置
-	MaxConnections     int           `json:"max_connections"`
-	MaxTransactions    int           `json:"max_transactions"`
-	ConnectionTimeout  time.Duration `json:"connection_timeout"`
-	TransactionTimeout time.Duration `json:"transaction_timeout"`
+	// 解析器配置
+	MaxSessions        int           `json:"max_sessions"`        // 最大并发解析会话数
+	MaxTransactions    int           `json:"max_transactions"`    // 最大事务数
+	SessionTimeout     time.Duration `json:"session_timeout"`     // 会话超时时间
+	TransactionTimeout time.Duration `json:"transaction_timeout"` // 事务超时时间
 
 	// 缓冲区配置
-	BufferSize int `json:"buffer_size"`
+	BufferSize int `json:"buffer_size"` // 数据包缓冲区大小
 
 	// 协议支持
-	EnableHTTP1 bool `json:"enable_http1"`
-	EnableHTTP2 bool `json:"enable_http2"`
+	EnableHTTP1 bool `json:"enable_http1"` // 启用HTTP/1.x解析
+	EnableHTTP2 bool `json:"enable_http2"` // 启用HTTP/2解析
 
 	// 自动清理
-	AutoCleanup     bool          `json:"auto_cleanup"`
-	CleanupInterval time.Duration `json:"cleanup_interval"`
+	AutoCleanup     bool          `json:"auto_cleanup"`     // 自动清理过期数据
+	CleanupInterval time.Duration `json:"cleanup_interval"` // 清理间隔
 
 	// Channel配置
 	ChannelBufferSize int  `json:"channel_buffer_size"` // Channel缓冲区大小
@@ -105,9 +105,9 @@ func New(config *Config) *HTrack {
 
 	// 转换配置
 	connConfig := &connection.Config{
-		MaxConnections:     config.MaxConnections,
+		MaxConnections:     config.MaxSessions,
 		MaxTransactions:    config.MaxTransactions,
-		ConnectionTimeout:  config.ConnectionTimeout,
+		ConnectionTimeout:  config.SessionTimeout,
 		TransactionTimeout: config.TransactionTimeout,
 		BufferSize:         config.BufferSize,
 		EnableHTTP2:        config.EnableHTTP2,
@@ -141,15 +141,15 @@ func New(config *Config) *HTrack {
 }
 
 // ProcessPacket 处理HTTP数据包
-// connectionID: 连接标识符
-// data: 数据包内容
+// sessionID: 会话标识符（用于关联同一会话的请求响应）
+// data: HTTP协议数据包内容
 // direction: 数据方向（请求/响应）
-func (ht *HTrack) ProcessPacket(connectionID string, data []byte, direction types.Direction) error {
+func (ht *HTrack) ProcessPacket(sessionID string, data []byte, direction types.Direction) error {
 	if len(data) == 0 {
 		return errors.New("empty packet data")
 	}
 
-	return ht.manager.ProcessPacket(connectionID, data, direction)
+	return ht.manager.ProcessPacket(sessionID, data, direction)
 }
 
 // SetEventHandlers 设置事件处理器
@@ -347,9 +347,9 @@ func (ht *HTrack) autoCleanup() {
 // DefaultConfig 返回默认配置
 func DefaultConfig() *Config {
 	return &Config{
-		MaxConnections:     10000,
+		MaxSessions:        10000,
 		MaxTransactions:    10000,
-		ConnectionTimeout:  30 * time.Second,
+		SessionTimeout:     30 * time.Second,
 		TransactionTimeout: 60 * time.Second,
 		BufferSize:         64 * 1024, // 64KB
 		EnableHTTP1:        true,
@@ -357,14 +357,14 @@ func DefaultConfig() *Config {
 		AutoCleanup:        true,
 		CleanupInterval:    5 * time.Minute,
 		ChannelBufferSize:  100,
-		EnableChannels:     true, // 默认不启用
+		EnableChannels:     true,
 	}
 }
 
 // 便捷函数
 
 // ProcessHTTPPacket 处理HTTP数据包的便捷函数
-func ProcessHTTPPacket(connectionID string, data []byte, direction types.Direction) (*types.HTTPRequest, *types.HTTPResponse, error) {
+func ProcessHTTPPacket(sessionID string, data []byte, direction types.Direction) (*types.HTTPRequest, *types.HTTPResponse, error) {
 	ht := New(nil)
 	defer ht.Close()
 
@@ -386,7 +386,7 @@ func ProcessHTTPPacket(connectionID string, data []byte, direction types.Directi
 	})
 
 	// 处理数据包
-	err := ht.ProcessPacket(connectionID, data, direction)
+	err := ht.ProcessPacket(sessionID, data, direction)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -400,7 +400,7 @@ func ProcessHTTPPacket(connectionID string, data []byte, direction types.Directi
 
 // ParseHTTPMessage 解析单个HTTP消息的便捷函数
 func ParseHTTPMessage(data []byte) (*types.HTTPRequest, *types.HTTPResponse, error) {
-	return ProcessHTTPPacket("temp-connection", data, types.DirectionRequest)
+	return ProcessHTTPPacket("temp-session", data, types.DirectionRequest)
 }
 
 // setupChannelHandlers 设置内部channel事件处理器
