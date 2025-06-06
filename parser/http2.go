@@ -34,6 +34,7 @@ type HTTP2Connection struct {
 	LastStreamID uint32
 	GoAway       bool
 	hpackDecoder *hpack.Decoder
+	hpackMux     sync.Mutex // 保护hpackDecoder的互斥锁
 }
 
 // GetConnection 安全地获取连接
@@ -434,8 +435,10 @@ func (p *HTTP2Parser) decodeCompleteHeaders(connectionID string, stream *HTTP2St
 		completeHeaderBlock = append(completeHeaderBlock, block...)
 	}
 
-	// 解码头部块
+	// 解码头部块 - 使用互斥锁保护hpackDecoder
+	conn.hpackMux.Lock()
 	headerFields, err := conn.hpackDecoder.DecodeFull(completeHeaderBlock)
+	conn.hpackMux.Unlock()
 	if err != nil {
 		return nil, fmt.Errorf("HPACK decode error: %v", err)
 	}
@@ -592,9 +595,12 @@ func (p *HTTP2Parser) parseResponseHeadersFrame(connectionID string, header http
 		// 或者我们可以选择在这里返回一个错误，指示连接未找到
 		return nil, fmt.Errorf("connection not found for ID: %s", connectionID)
 	}
+	// 使用互斥锁保护hpackDecoder
+	connection.hpackMux.Lock()
 	headerFields, err := connection.hpackDecoder.DecodeFull(data)
+	connection.hpackMux.Unlock()
 	if err != nil {
-		return nil, fmt.Errorf("HPACK decode error: %v", err)
+		return nil, fmt.Errorf("failed to decode headers: %v", err)
 	}
 
 	// 转换为http.Header
