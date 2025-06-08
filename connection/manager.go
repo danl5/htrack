@@ -466,77 +466,77 @@ func (m *Manager) looksLikeHTTPData(data []byte) bool {
 		(len(data) > 10 && bytes.Contains(bytes.ToUpper(data), []byte("HTTP")))
 }
 
-// parseHTTP2Messages 解析HTTP/2消息 - 支持多流并发处理
+// parseHTTP2Messages 解析HTTP/2消息 - 多帧处理
 func (m *Manager) parseHTTP2Messages(conn *Connection, data []byte) error {
-	// HTTP/2的解析逻辑 - 支持多流并发
+	// HTTP/2的解析逻辑 - 统一接口处理
 	if conn.LastDirection == types.DirectionRequest {
-		// 尝试解析所有请求流
+		// 解析所有请求帧
 		if http2Parser, ok := conn.Parser.(*parser.HTTP2Parser); ok {
-			if requests, err := http2Parser.ParseAllRequests(data); err == nil {
+			if requests, err := http2Parser.ParseRequest(conn.ID, data); err == nil {
 				// 处理所有请求
 				for _, request := range requests {
-					if err := m.handleParsedRequest(conn, request); err != nil {
-						if m.callbacks != nil && m.callbacks.OnError != nil {
-							m.callbacks.OnError(fmt.Errorf("failed to handle request for stream %d: %w", *request.StreamID, err))
+					if request != nil {
+						if err := m.handleParsedRequest(conn, request); err != nil {
+							if m.callbacks != nil && m.callbacks.OnError != nil {
+								m.callbacks.OnError(fmt.Errorf("failed to handle request for stream %d: %w", *request.StreamID, err))
+							}
 						}
 					}
 				}
 				return nil
 			} else {
-				// 对于HTTP/2，某些错误是可以接受的（如只有连接前导）
+				// 对于HTTP/2，某些错误是可以接受的（如不完整的帧数据）
+				if err.Error() == "insufficient data for frame header" || err.Error() == "incomplete frame data" {
+					return nil // 等待更多数据
+				}
+				// 对于连接前导，也是正常的
 				if bytes.HasPrefix(data, []byte("PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")) {
 					return nil // 连接前导是正常的
 				}
-				// 检查是否是不完整的帧数据
-				if len(data) < 9 {
-					return nil // 等待更多数据
-				}
-				// 检查帧长度是否完整
-				frameLength := uint32(data[0])<<16 | uint32(data[1])<<8 | uint32(data[2])
-				if len(data) < int(9+frameLength) {
-					return nil // 等待完整帧数据
-				}
-				// For HTTP/2 fragmented data, don't log errors - just wait for more data
-				// This is especially important for extreme fragmentation scenarios
-				return nil // 不返回错误，继续处理
-			}
-		} else {
-			// 回退到单流解析
-			if request, err := conn.Parser.ParseRequest(conn.ID, data); err == nil {
-				return m.handleParsedRequest(conn, request)
+				// 其他错误可能需要记录，但不中断处理
+				return nil
 			}
 		}
 	} else if conn.LastDirection == types.DirectionResponse {
-		// 尝试解析所有响应流
+		// 解析所有响应帧
 		if http2Parser, ok := conn.Parser.(*parser.HTTP2Parser); ok {
-			if responses, err := http2Parser.ParseAllResponses(data); err == nil {
+			if responses, err := http2Parser.ParseResponse(conn.ID, data); err == nil {
 				// 处理所有响应
 				for _, response := range responses {
-					if err := m.handleParsedResponse(conn, response); err != nil {
-						if m.callbacks != nil && m.callbacks.OnError != nil {
-							m.callbacks.OnError(fmt.Errorf("failed to handle response for stream %d: %w", *response.StreamID, err))
+					if response != nil {
+						if err := m.handleParsedResponse(conn, response); err != nil {
+							if m.callbacks != nil && m.callbacks.OnError != nil {
+								m.callbacks.OnError(fmt.Errorf("failed to handle response for stream %d: %w", *response.StreamID, err))
+							}
 						}
 					}
 				}
 				return nil
 			} else {
-				// For HTTP/2 fragmented data, don't log errors - just wait for more data
-				return nil // 不返回错误，继续处理
-			}
-		} else {
-			// 回退到单流解析
-			if response, err := conn.Parser.ParseResponse(conn.ID, data); err == nil {
-				return m.handleParsedResponse(conn, response)
+				// 对于HTTP/2，某些错误是可以接受的（如不完整的帧数据）
+				if err.Error() == "insufficient data for frame header" || err.Error() == "incomplete frame data" {
+					return nil // 等待更多数据
+				}
+				// 其他错误可能需要记录，但不中断处理
+				return nil
 			}
 		}
 	}
+
 	return nil
 }
 
 // parseRequestMessage 解析请求消息
 func (m *Manager) parseRequestMessage(conn *Connection, data []byte, isComplete, looksLikeHTTP bool) error {
-	if request, err := conn.Parser.ParseRequest(conn.ID, data); err == nil {
-		return m.handleParsedRequest(conn, request)
+	if requests, err := conn.Parser.ParseRequest(conn.ID, data); err == nil {
+		for _, request := range requests {
+			if request != nil {
+				if err := m.handleParsedRequest(conn, request); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
 	} else if isComplete || looksLikeHTTP {
 		if m.callbacks != nil && m.callbacks.OnError != nil {
 			m.callbacks.OnError(fmt.Errorf("failed to parse request: %w", err))
@@ -548,8 +548,15 @@ func (m *Manager) parseRequestMessage(conn *Connection, data []byte, isComplete,
 
 // parseResponseMessage 解析响应消息
 func (m *Manager) parseResponseMessage(conn *Connection, data []byte, isComplete, looksLikeHTTP bool) error {
-	if response, err := conn.Parser.ParseResponse(conn.ID, data); err == nil {
-		return m.handleParsedResponse(conn, response)
+	if responses, err := conn.Parser.ParseResponse(conn.ID, data); err == nil {
+		for _, response := range responses {
+			if response != nil {
+				if err := m.handleParsedResponse(conn, response); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
 	} else if isComplete || looksLikeHTTP {
 		if m.callbacks != nil && m.callbacks.OnError != nil {
 			m.callbacks.OnError(fmt.Errorf("failed to parse response: %w", err))

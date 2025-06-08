@@ -115,10 +115,14 @@ func TestHTTP2ParserFrameProcessing(t *testing.T) {
 
 	// 测试连接前导
 	preface := "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
-	req, err := parser.ParseRequest("test-conn", []byte(preface))
+	reqs, err := parser.ParseRequest("test-conn", []byte(preface))
 	if err != nil {
 		t.Fatalf("解析连接前导失败: %v", err)
 	}
+	if len(reqs) == 0 {
+		t.Fatal("连接前导应该返回请求对象")
+	}
+	req := reqs[0]
 	if req.Method != "PRI" {
 		t.Errorf("Method = %v, want PRI", req.Method)
 	}
@@ -131,53 +135,24 @@ func TestHTTP2ParserFrameProcessing(t *testing.T) {
 		0x00, 0x00, 0x00, 0x00, // Stream ID: 0
 	}
 
-	req, err = parser.ParseRequest("test-conn", settingsFrame)
+	reqs, err = parser.ParseRequest("test-conn", settingsFrame)
 	if err != nil {
 		t.Fatalf("解析SETTINGS帧失败: %v", err)
+	}
+	if len(reqs) != 0 {
+		t.Errorf("SETTINGS帧不应该返回请求对象")
 	}
 
 	// 测试简单的HEADERS帧（模拟GET请求）
 	headersData := createSimpleHeadersFrame(t)
-	req, err = parser.ParseRequest("test-conn", headersData)
+	reqs, err = parser.ParseRequest("test-conn", headersData)
 	if err != nil {
 		t.Fatalf("解析HEADERS帧失败: %v", err)
 	}
-	if req == nil {
-		t.Fatal("解析HEADERS帧返回nil")
+	if len(reqs) == 0 {
+		t.Fatal("HEADERS帧应该返回请求对象")
 	}
-}
-
-// createSimpleHeadersFrame 创建一个简单的HEADERS帧用于测试
-func createSimpleHeadersFrame(t *testing.T) []byte {
-	// 这是一个简化的HEADERS帧，包含基本的HTTP/2头部
-	// 实际的HPACK编码会更复杂
-	headerBlock := []byte{
-		0x82, // :method: GET (索引2)
-		0x86, // :scheme: http (索引6)
-		0x84, // :path: / (索引4)
-		0x01, // :authority: (字面量)
-		0x0f, // 长度15
-	}
-	headerBlock = append(headerBlock, []byte("www.example.com")...)
-
-	// 构建完整的HEADERS帧
-	frame := make([]byte, 9+len(headerBlock))
-
-	// 帧头
-	frame[0] = byte(len(headerBlock) >> 16)
-	frame[1] = byte(len(headerBlock) >> 8)
-	frame[2] = byte(len(headerBlock))
-	frame[3] = 0x01 // HEADERS
-	frame[4] = 0x05 // END_STREAM | END_HEADERS
-	frame[5] = 0x00
-	frame[6] = 0x00
-	frame[7] = 0x00
-	frame[8] = 0x01 // Stream ID: 1
-
-	// 头部块
-	copy(frame[9:], headerBlock)
-
-	return frame
+	req = reqs[0]
 }
 
 // TestFrameHeaderWriting 测试帧头写入

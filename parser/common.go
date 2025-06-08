@@ -14,8 +14,8 @@ import (
 
 // Parser HTTP解析器接口
 type Parser interface {
-	ParseRequest(connectionID string, data []byte) (*types.HTTPRequest, error)
-	ParseResponse(connectionID string, data []byte) (*types.HTTPResponse, error)
+	ParseRequest(connectionID string, data []byte) ([]*types.HTTPRequest, error)
+	ParseResponse(connectionID string, data []byte) ([]*types.HTTPResponse, error)
 	DetectVersion(data []byte) types.HTTPVersion
 	IsComplete(data []byte) bool
 	GetRequiredBytes(data []byte) int
@@ -92,18 +92,22 @@ func (pp *PacketProcessor) ProcessPacket(connectionID string, data []byte, seque
 
 	if direction == types.DirectionClientToServer {
 		// 解析请求
-		req, err := parser.ParseRequest(connectionID, buffer.data)
+		reqs, err := parser.ParseRequest(connectionID, buffer.data)
 		if err != nil {
 			return nil, err
 		}
-		result.Request = req
+		if len(reqs) > 0 {
+			result.Request = reqs[0] // 返回第一个请求以保持兼容性
+		}
 	} else {
 		// 解析响应
-		resp, err := parser.ParseResponse(connectionID, buffer.data)
+		resps, err := parser.ParseResponse(connectionID, buffer.data)
 		if err != nil {
 			return nil, err
 		}
-		result.Response = resp
+		if len(resps) > 0 {
+			result.Response = resps[0] // 返回第一个响应以保持兼容性
+		}
 	}
 
 	// 清理缓冲区

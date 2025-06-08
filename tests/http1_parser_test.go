@@ -11,9 +11,11 @@ func TestParseHTTPRequest_SimpleGET(t *testing.T) {
 	p := parser.NewHTTP1Parser()
 	rawData := []byte("GET /test HTTP/1.1\r\nHost: example.com\r\nUser-Agent: test-agent\r\n\r\n")
 
-	req, err := p.ParseRequest("test-session-1", rawData)
+	reqs, err := p.ParseRequest("test-session-1", rawData)
 
 	assert.NoError(t, err)
+	assert.NotEmpty(t, reqs)
+	req := reqs[0]
 	assert.NotNil(t, req)
 	assert.Equal(t, "GET", req.Method)
 	assert.Equal(t, "/test", req.URL.Path)
@@ -27,9 +29,11 @@ func TestParseHTTPResponse_SimpleOK(t *testing.T) {
 	p := parser.NewHTTP1Parser()
 	rawData := []byte("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 12\r\n\r\nHello, world")
 
-	resp, err := p.ParseResponse("test-session-1", rawData)
+	resps, err := p.ParseResponse("test-session-1", rawData)
 
 	assert.NoError(t, err)
+	assert.NotEmpty(t, resps)
+	resp := resps[0]
 	assert.NotNil(t, resp)
 	assert.Equal(t, 200, resp.StatusCode)
 	assert.Equal(t, "OK", resp.Status)
@@ -44,9 +48,11 @@ func TestParseHTTPRequest_POSTWithBody(t *testing.T) {
 	p := parser.NewHTTP1Parser()
 	rawData := []byte("POST /submit HTTP/1.1\r\nHost: example.com\r\nContent-Type: application/json\r\nContent-Length: 15\r\n\r\n{\"key\":\"value\"}")
 
-	req, err := p.ParseRequest("test-session-1", rawData)
+	reqs, err := p.ParseRequest("test-session-1", rawData)
 
 	assert.NoError(t, err)
+	assert.NotEmpty(t, reqs)
+	req := reqs[0]
 	assert.NotNil(t, req)
 	assert.Equal(t, "POST", req.Method)
 	assert.Equal(t, "/submit", req.URL.Path)
@@ -61,8 +67,10 @@ func TestParseHTTPRequest_Chunked(t *testing.T) {
 	fullData := []byte("POST /chunked HTTP/1.1\r\nHost: example.com\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nWiki\r\n5\r\npedia\r\nE\r\n in\r\n\r\nchunks.\r\n0\r\n\r\n")
 
 	// 测试完整数据
-	req, err := p.ParseRequest("test-session-1", fullData)
+	reqs, err := p.ParseRequest("test-session-1", fullData)
 	assert.NoError(t, err)
+	assert.NotEmpty(t, reqs)
+	req := reqs[0]
 	assert.NotNil(t, req)
 	assert.True(t, req.Complete)
 	assert.Equal(t, "POST", req.Method)

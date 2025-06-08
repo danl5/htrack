@@ -7,46 +7,26 @@ import (
 
 // HTTPResponse 表示完整的HTTP响应
 type HTTPResponse struct {
-	// 基本信息
-	StatusCode    int         // 状态码
-	Status        string      // 状态文本
-	Proto         string      // 协议版本字符串
-	ProtoMajor    int         // 主版本号
-	ProtoMinor    int         // 次版本号
-	Headers       http.Header // 响应头
-	Body          []byte      // 响应体
-	ContentLength int64       // 内容长度
+	HTTPMessage // 嵌入基础消息结构
 
-	// 元数据
-	Metadata  *TransactionMetadata // 事务元数据
-	Timestamp time.Time            // 响应时间戳
-	RawData   []byte               // 原始数据
+	// 响应特有字段
+	StatusCode int    // 状态码
+	Status     string // 状态文本
 
 	// HTTP/2特有字段
-	StreamID *uint32     // 流ID（HTTP/2）
 	Trailers http.Header // 尾部头（HTTP/2）
-
-	// 解析状态
-	Complete   bool                // 是否解析完成
-	ParseError error               // 解析错误
-	Fragments  []*ResponseFragment // 数据片段
 
 	// 传输编码相关
 	TransferEncoding []string     // 传输编码
 	Chunked          bool         // 是否分块传输
 	Chunks           []*ChunkInfo // 分块信息
+
+	// 兼容性字段（保持向后兼容）
+	Fragments []*ResponseFragment // 数据片段
 }
 
-// ResponseFragment 响应数据片段
-type ResponseFragment struct {
-	SequenceNum uint64    // 序列号
-	Data        []byte    // 片段数据
-	Offset      int64     // 在完整响应中的偏移
-	Length      int       // 片段长度
-	Timestamp   time.Time // 接收时间
-	Direction   Direction // 数据方向
-	Reassembled bool      // 是否已重组
-}
+// ResponseFragment 响应数据片段（为了向后兼容保留）
+type ResponseFragment = Fragment
 
 // ChunkInfo 分块传输信息
 type ChunkInfo struct {
@@ -58,13 +38,11 @@ type ChunkInfo struct {
 
 // ResponseBuilder 响应构建器，用于逐步构建完整响应
 type ResponseBuilder struct {
+	*BaseMessageBuilder
 	response    *HTTPResponse
-	buffer      []byte
 	headersDone bool
 	bodyLength  int64
 	bodyRead    int64
-	fragments   map[uint64]*ResponseFragment
-	lastSeq     uint64
 	chunkState  ChunkState
 	chunkSize   int64
 	chunkRead   int64
@@ -83,74 +61,54 @@ const (
 
 // NewResponseBuilder 创建新的响应构建器
 func NewResponseBuilder() *ResponseBuilder {
+	baseBuilder := NewBaseMessageBuilder()
+	response := &HTTPResponse{
+		HTTPMessage: *baseBuilder.GetRawMessage(),
+		Trailers:    make(http.Header),
+		Fragments:   make([]*ResponseFragment, 0),
+		Chunks:      make([]*ChunkInfo, 0),
+	}
 	return &ResponseBuilder{
-		response: &HTTPResponse{
-			Headers:   make(http.Header),
-			Trailers:  make(http.Header),
-			Fragments: make([]*ResponseFragment, 0),
-			Chunks:    make([]*ChunkInfo, 0),
-			Timestamp: time.Now(),
-		},
-		fragments:  make(map[uint64]*ResponseFragment),
-		chunkState: ChunkStateSize,
+		BaseMessageBuilder: baseBuilder,
+		response:           response,
+		chunkState:         ChunkStateSize,
 	}
 }
 
 // AddFragment 添加数据片段
 func (rb *ResponseBuilder) AddFragment(fragment *ResponseFragment) error {
-	// 检查片段是否已存在
-	if _, exists := rb.fragments[fragment.SequenceNum]; exists {
-		return nil // 重复片段，忽略
+	// 添加到基础构建器
+	if err := rb.BaseMessageBuilder.AddFragment(fragment); err != nil {
+		return err
 	}
 
-	// 存储片段
-	rb.fragments[fragment.SequenceNum] = fragment
+	// 保持向后兼容，添加到响应的片段列表
 	rb.response.Fragments = append(rb.response.Fragments, fragment)
 
-	// 尝试重组
-	return rb.tryReassemble()
-}
-
-// tryReassemble 尝试重组数据
-func (rb *ResponseBuilder) tryReassemble() error {
-	// 按序列号排序片段
-	var sortedFragments []*ResponseFragment
-	for seq := rb.lastSeq + 1; ; seq++ {
-		frag, exists := rb.fragments[seq]
-		if !exists {
-			break
-		}
-		sortedFragments = append(sortedFragments, frag)
-		rb.lastSeq = seq
-	}
-
-	// 拼接数据
-	for _, frag := range sortedFragments {
-		rb.buffer = append(rb.buffer, frag.Data...)
-		frag.Reassembled = true
-	}
-
-	// 尝试解析HTTP响应
+	// 尝试解析HTTP
 	return rb.parseHTTP()
 }
 
+
+
 // parseHTTP 解析HTTP响应
 func (rb *ResponseBuilder) parseHTTP() error {
-	if len(rb.buffer) == 0 {
+	buffer := rb.GetBuffer()
+	if len(buffer) == 0 {
 		return nil
 	}
 
 	// 如果还没有解析响应头
 	if !rb.headersDone {
 		// 查找响应头结束标记
-		headerEnd := findHeaderEnd(rb.buffer)
+		headerEnd := findHeaderEnd(buffer)
 		if headerEnd == -1 {
 			return nil // 响应头还不完整
 		}
 
 		// 解析状态行和响应头
-		if err := rb.parseStatusLine(rb.buffer[:headerEnd]); err != nil {
-			rb.response.ParseError = err
+		if err := rb.parseStatusLine(buffer[:headerEnd]); err != nil {
+			rb.SetError(err)
 			return err
 		}
 
@@ -166,7 +124,7 @@ func (rb *ResponseBuilder) parseHTTP() error {
 		}
 
 		// 移除已解析的响应头部分
-		rb.buffer = rb.buffer[headerEnd+4:] // +4 for \r\n\r\n
+		rb.SetBuffer(buffer[headerEnd+4:]) // +4 for \r\n\r\n
 	}
 
 	// 解析响应体
@@ -190,7 +148,10 @@ func (rb *ResponseBuilder) parseStatusLine(data []byte) error {
 		return ErrInvalidStatusLine
 	}
 
-	rb.response.Proto = string(parts[0])
+	// 使用基础构建器解析协议版本
+	rb.ParseProtocolVersion(string(parts[0]))
+
+	// 解析状态码
 	if statusCode, err := parseInt(string(parts[1])); err == nil {
 		rb.response.StatusCode = statusCode
 	} else {
@@ -202,51 +163,33 @@ func (rb *ResponseBuilder) parseStatusLine(data []byte) error {
 		rb.response.Status = string(joinBytes(parts[2:], ' '))
 	}
 
-	// 解析协议版本
-	if rb.response.Proto == "HTTP/1.0" {
-		rb.response.ProtoMajor, rb.response.ProtoMinor = 1, 0
-	} else if rb.response.Proto == "HTTP/1.1" {
-		rb.response.ProtoMajor, rb.response.ProtoMinor = 1, 1
-	}
+	// 使用基础构建器解析头部
+	rb.ParseHeaders(lines[1:])
 
-	// 解析响应头
-	for i := 1; i < len(lines); i++ {
-		line := lines[i]
-		if len(line) == 0 {
-			break
-		}
-
-		colonIdx := findByte(line, ':')
-		if colonIdx == -1 {
-			continue
-		}
-
-		key := string(trimSpace(line[:colonIdx]))
-		value := string(trimSpace(line[colonIdx+1:]))
-		rb.response.Headers.Add(key, value)
-	}
-
-	// 获取Content-Length
-	if contentLength := rb.response.Headers.Get("Content-Length"); contentLength != "" {
-		if length, err := parseInt64(contentLength); err == nil {
-			rb.response.ContentLength = length
-		}
-	}
+	// 同步到响应对象
+	baseMsg := rb.GetRawMessage()
+	rb.response.Proto = baseMsg.Proto
+	rb.response.ProtoMajor = baseMsg.ProtoMajor
+	rb.response.ProtoMinor = baseMsg.ProtoMinor
+	rb.response.Headers = baseMsg.Headers
+	rb.response.ContentLength = baseMsg.ContentLength
 
 	return nil
 }
 
 // parseRegularBody 解析普通响应体
 func (rb *ResponseBuilder) parseRegularBody() error {
+	buffer := rb.GetBuffer()
 	if rb.bodyLength > 0 {
-		if int64(len(rb.buffer)) >= rb.bodyLength {
-			rb.response.Body = rb.buffer[:rb.bodyLength]
+		if int64(len(buffer)) >= rb.bodyLength {
+			rb.response.Body = buffer[:rb.bodyLength]
 			rb.response.Complete = true
+			rb.SetComplete(true)
 		}
 	} else {
 		// 没有Content-Length，读取所有可用数据
 		// 这种情况下需要依赖连接关闭来确定响应结束
-		rb.response.Body = rb.buffer
+		rb.response.Body = buffer
 		// 注意：这里不能直接设置Complete=true，需要外部判断连接状态
 	}
 
@@ -255,16 +198,17 @@ func (rb *ResponseBuilder) parseRegularBody() error {
 
 // parseChunkedBody 解析分块传输响应体
 func (rb *ResponseBuilder) parseChunkedBody() error {
-	for len(rb.buffer) > 0 {
+	buffer := rb.GetBuffer()
+	for len(buffer) > 0 {
 		switch rb.chunkState {
 		case ChunkStateSize:
 			// 读取块大小
-			crlfIdx := findCRLF(rb.buffer)
+			crlfIdx := findCRLF(buffer)
 			if crlfIdx == -1 {
 				return nil // 等待更多数据
 			}
 
-			sizeLine := rb.buffer[:crlfIdx]
+			sizeLine := buffer[:crlfIdx]
 			size, err := parseHexInt64(string(sizeLine))
 			if err != nil {
 				return err
@@ -272,7 +216,8 @@ func (rb *ResponseBuilder) parseChunkedBody() error {
 
 			rb.chunkSize = size
 			rb.chunkRead = 0
-			rb.buffer = rb.buffer[crlfIdx+2:]
+			buffer = buffer[crlfIdx+2:]
+			rb.SetBuffer(buffer)
 
 			if size == 0 {
 				// 最后一个块
@@ -284,11 +229,11 @@ func (rb *ResponseBuilder) parseChunkedBody() error {
 		case ChunkStateData:
 			// 读取块数据
 			remaining := rb.chunkSize - rb.chunkRead
-			available := int64(len(rb.buffer))
+			available := int64(len(buffer))
 
 			if available >= remaining {
 				// 可以读取完整的块
-				chunkData := rb.buffer[:remaining]
+				chunkData := buffer[:remaining]
 				chunk := &ChunkInfo{
 					Size:      rb.chunkSize,
 					Data:      make([]byte, len(chunkData)),
@@ -298,35 +243,37 @@ func (rb *ResponseBuilder) parseChunkedBody() error {
 				rb.response.Chunks = append(rb.response.Chunks, chunk)
 				rb.response.Body = append(rb.response.Body, chunkData...)
 
-				rb.buffer = rb.buffer[remaining:]
+				buffer = buffer[remaining:]
+				rb.SetBuffer(buffer)
 				rb.chunkState = ChunkStateCRLF
 			} else {
 				// 部分数据
 				rb.chunkRead += available
-				rb.response.Body = append(rb.response.Body, rb.buffer...)
-				rb.buffer = rb.buffer[:0]
+				rb.response.Body = append(rb.response.Body, buffer...)
+				rb.SetBuffer([]byte{})
 				return nil
 			}
 
 		case ChunkStateCRLF:
 			// 读取块结束的CRLF
-			if len(rb.buffer) < 2 {
+			if len(buffer) < 2 {
 				return nil // 等待更多数据
 			}
 
-			rb.buffer = rb.buffer[2:] // 跳过CRLF
+			buffer = buffer[2:] // 跳过CRLF
+			rb.SetBuffer(buffer)
 			rb.chunkState = ChunkStateSize
 
 		case ChunkStateTrailer:
 			// 读取尾部头
-			trailerEnd := findHeaderEnd(rb.buffer)
+			trailerEnd := findHeaderEnd(buffer)
 			if trailerEnd == -1 {
 				return nil // 等待更多数据
 			}
 
 			// 解析尾部头（如果有的话）
 			if trailerEnd > 0 {
-				trailerLines := splitLines(rb.buffer[:trailerEnd])
+				trailerLines := splitLines(buffer[:trailerEnd])
 				for _, line := range trailerLines {
 					if len(line) == 0 {
 						continue
@@ -344,12 +291,14 @@ func (rb *ResponseBuilder) parseChunkedBody() error {
 			}
 
 			rb.response.Complete = true
+			rb.SetComplete(true)
 			rb.chunkState = ChunkStateDone
 			return nil
 
 		case ChunkStateDone:
 			return nil
 		}
+		buffer = rb.GetBuffer()
 	}
 
 	return nil
@@ -357,15 +306,18 @@ func (rb *ResponseBuilder) parseChunkedBody() error {
 
 // GetResponse 获取构建的响应
 func (rb *ResponseBuilder) GetResponse() *HTTPResponse {
+	// 同步基础消息状态到响应对象
+	rb.response.Complete = rb.BaseMessageBuilder.IsComplete()
+	rb.response.ParseError = rb.BaseMessageBuilder.GetError()
 	return rb.response
 }
 
 // IsComplete 检查响应是否完整
 func (rb *ResponseBuilder) IsComplete() bool {
-	return rb.response.Complete
+	return rb.BaseMessageBuilder.IsComplete()
 }
 
-// HasError 检查是否有解析错误
+// HasError 检查是否有错误
 func (rb *ResponseBuilder) HasError() bool {
-	return rb.response.ParseError != nil
+	return rb.BaseMessageBuilder.HasError()
 }

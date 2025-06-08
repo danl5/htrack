@@ -1,13 +1,11 @@
 package tests
 
 import (
-	"bytes"
 	"fmt"
 	"testing"
 
 	"github.com/danl5/htrack/parser"
 	"github.com/danl5/htrack/types"
-	"golang.org/x/net/http2/hpack"
 )
 
 // TestHTTP2StreamLifecycle 测试HTTP/2流的生命周期
@@ -22,13 +20,14 @@ func TestHTTP2StreamLifecycle(t *testing.T) {
 			"accept":     "text/html,application/xhtml+xml",
 		}
 		headersFrame := createHeadersFrameWithStreamID(t, 1, true, true, customHeaders)
-		req, err := parser.ParseRequest("test-conn", headersFrame)
+		reqs, err := parser.ParseRequest("test-conn", headersFrame)
 		if err != nil {
 			t.Fatalf("解析HEADERS帧失败: %v", err)
 		}
-		if req == nil {
-			t.Fatal("解析HEADERS帧返回nil")
+		if len(reqs) == 0 {
+			t.Fatal("解析HEADERS帧返回空数组")
 		}
+		req := reqs[0]
 		if *req.StreamID != 1 {
 			t.Errorf("期望流ID为1，实际为: %d", req.StreamID)
 		}
@@ -55,10 +54,11 @@ func TestHTTP2StreamLifecycle(t *testing.T) {
 
 		// 然后发送DATA帧
 		dataFrame := createDataFrameWithStreamID(t, 3, []byte("Hello, HTTP/2!"), true)
-		req, err := parser.ParseRequest("test-conn", dataFrame)
+		reqs, err := parser.ParseRequest("test-conn", dataFrame)
 		if err != nil {
 			t.Fatalf("解析DATA帧失败: %v", err)
 		}
+		req := reqs[0]
 		if req == nil {
 			t.Fatal("解析DATA帧返回nil")
 		}
@@ -77,13 +77,15 @@ func TestHTTP2StreamLifecycle(t *testing.T) {
 			"connection": "close",
 		}
 		headersFrame := createHeadersFrameWithStreamID(t, 5, true, true, customHeaders)
-		req, err := parser.ParseRequest("test-conn", headersFrame)
+		reqs, err := parser.ParseRequest("test-conn", headersFrame)
 		if err != nil {
 			t.Fatalf("解析HEADERS帧失败: %v", err)
 		}
-		if req == nil {
-			t.Fatal("解析HEADERS帧返回nil")
+		if len(reqs) == 0 {
+			t.Fatal("解析HEADERS帧返回空数组")
 		}
+		req := reqs[0]
+		_ = req // 使用变量避免编译错误
 	})
 }
 
@@ -101,12 +103,14 @@ func TestHTTP2MultipleStreams(t *testing.T) {
 			"accept-encoding": "gzip, deflate",
 		}
 		headersFrame := createHeadersFrameWithStreamID(t, streamID, false, true, customHeaders)
-		req, err := parser.ParseRequest("test-conn", headersFrame)
+		reqs, err := parser.ParseRequest("test-conn", headersFrame)
 		if err != nil {
 			t.Fatalf("解析流%d的HEADERS帧失败: %v", streamID, err)
 		}
-		if req != nil {
-			requests = append(requests, req)
+		for _, req := range reqs {
+			if req != nil {
+				requests = append(requests, req)
+			}
 		}
 	}
 
@@ -119,12 +123,14 @@ func TestHTTP2MultipleStreams(t *testing.T) {
 	for _, streamID := range streamIDs {
 		data := []byte(fmt.Sprintf("Data for stream %d", streamID))
 		dataFrame := createDataFrameWithStreamID(t, streamID, data, true)
-		req, err := parser.ParseRequest("test-conn", dataFrame)
+		reqs, err := parser.ParseRequest("test-conn", dataFrame)
 		if err != nil {
 			t.Fatalf("解析流%d的DATA帧失败: %v", streamID, err)
 		}
-		if req != nil && string(req.Body) != string(data) {
-			t.Errorf("流%d数据不匹配，期望: %s，实际: %s", streamID, string(data), string(req.Body))
+		for _, req := range reqs {
+			if req != nil && string(req.Body) != string(data) {
+				t.Errorf("流%d数据不匹配，期望: %s，实际: %s", streamID, string(data), string(req.Body))
+			}
 		}
 	}
 }
@@ -135,13 +141,14 @@ func TestHTTP2StreamPriority(t *testing.T) {
 
 	// 创建带优先级的HEADERS帧
 	headersFrame := createHeadersFrameWithPriority(t, 1, 0, 100, false)
-	req, err := parser.ParseRequest("test-conn", headersFrame)
+	reqs, err := parser.ParseRequest("test-conn", headersFrame)
 	if err != nil {
 		t.Fatalf("解析带优先级的HEADERS帧失败: %v", err)
 	}
-	if req == nil {
-		t.Fatal("解析带优先级的HEADERS帧返回nil")
+	if len(reqs) == 0 {
+		t.Fatal("解析带优先级的HEADERS帧返回空数组")
 	}
+	req := reqs[0]
 
 	// 验证优先级信息 - 修复：检查解析器是否支持优先级
 	if req.Priority == nil {
@@ -213,14 +220,16 @@ func TestHTTP2StreamContinuation(t *testing.T) {
 	}
 
 	// 解析CONTINUATION帧
-	req, err := parser.ParseRequest("test-conn", continuationFrame)
+	reqs, err := parser.ParseRequest("test-conn", continuationFrame)
 	if err != nil {
 		t.Skipf("解析CONTINUATION帧失败: %v，可能解析器不支持", err)
 		return
 	}
-	if req == nil {
-		t.Fatal("解析CONTINUATION帧返回nil")
+	if len(reqs) == 0 {
+		t.Fatal("解析CONTINUATION帧返回空数组")
 	}
+	req := reqs[0]
+	_ = req // 使用变量避免编译错误
 }
 
 // TestHTTP2StreamResponse 测试响应流处理
@@ -229,14 +238,15 @@ func TestHTTP2StreamResponse(t *testing.T) {
 
 	// 创建响应HEADERS帧
 	responseFrame := createResponseHeadersFrame(t, 1, 200)
-	resp, err := parser.ParseResponse("test-conn", responseFrame)
+	resps, err := parser.ParseResponse("test-conn", responseFrame)
 	if err != nil {
 		t.Skipf("解析响应HEADERS帧失败: %v，可能解析器不支持响应解析", err)
 		return
 	}
-	if resp == nil {
-		t.Fatal("解析响应HEADERS帧返回nil")
+	if len(resps) == 0 {
+		t.Fatal("解析响应HEADERS帧返回空数组")
 	}
+	resp := resps[0]
 	if resp.StatusCode != 200 {
 		t.Errorf("期望状态码为200，实际为: %d", resp.StatusCode)
 	}
@@ -244,347 +254,26 @@ func TestHTTP2StreamResponse(t *testing.T) {
 	// 创建响应DATA帧
 	responseData := []byte("Response body")
 	dataFrame := createDataFrameWithStreamID(t, 1, responseData, true)
-	resp, err = parser.ParseResponse("test-conn", dataFrame)
+	resps, err = parser.ParseResponse("test-conn", dataFrame)
 	if err != nil {
 		t.Fatalf("解析响应DATA帧失败: %v", err)
 	}
+	if len(resps) == 0 {
+		t.Fatal("解析响应DATA帧返回空数组")
+	}
+	resp = resps[0]
 	if resp == nil {
-		t.Fatal("解析响应DATA帧返回nil")
+		t.Fatal("解析响应DATA帧返回nil对象")
 	}
 	if string(resp.Body) != "Response body" {
 		t.Errorf("期望响应体为'Response body'，实际为: %s", string(resp.Body))
 	}
 }
 
-// 辅助函数：创建带指定流ID的HEADERS帧
-func createHeadersFrameWithStreamID(t *testing.T, streamID uint32, endStream bool, endHeaders bool, customHeaders map[string]string) []byte {
-	// 使用标准库HPACK编码器
-	var buf bytes.Buffer
-	encoder := hpack.NewEncoder(&buf)
-
-	// 编码HTTP/2伪头部
-	encoder.WriteField(hpack.HeaderField{Name: ":method", Value: "GET"})
-	encoder.WriteField(hpack.HeaderField{Name: ":scheme", Value: "http"})
-	encoder.WriteField(hpack.HeaderField{Name: ":path", Value: "/"})
-	encoder.WriteField(hpack.HeaderField{Name: ":authority", Value: "www.example.com"})
-
-	// 编码自定义头部
-	for name, value := range customHeaders {
-		encoder.WriteField(hpack.HeaderField{Name: name, Value: value})
-	}
-
-	headerBlock := buf.Bytes()
-
-	// 确保帧数据足够长
-	minFrameSize := 24
-	if len(headerBlock)+9 < minFrameSize {
-		padding := make([]byte, minFrameSize-len(headerBlock)-9)
-		headerBlock = append(headerBlock, padding...)
-	}
-
-	frame := make([]byte, 9+len(headerBlock))
-
-	// 帧头
-	frame[0] = byte(len(headerBlock) >> 16)
-	frame[1] = byte(len(headerBlock) >> 8)
-	frame[2] = byte(len(headerBlock))
-	frame[3] = 0x01 // HEADERS
-
-	// 设置标志
-	flags := byte(0)
-	if endStream {
-		flags |= 0x01 // END_STREAM
-	}
-	if endHeaders {
-		flags |= 0x04 // END_HEADERS
-	}
-	frame[4] = flags
-
-	// 流ID
-	frame[5] = byte(streamID >> 24)
-	frame[6] = byte(streamID >> 16)
-	frame[7] = byte(streamID >> 8)
-	frame[8] = byte(streamID)
-
-	// 头部块
-	copy(frame[9:], headerBlock)
-
-	return frame
-}
-
-// 辅助函数：创建带优先级的HEADERS帧
-func createHeadersFrameWithPriority(t *testing.T, streamID uint32, dependency uint32, weight uint8, exclusive bool) []byte {
-	// 使用标准库HPACK编码器
-	var buf bytes.Buffer
-	encoder := hpack.NewEncoder(&buf)
-
-	// 编码HTTP/2伪头部
-	encoder.WriteField(hpack.HeaderField{Name: ":method", Value: "GET"})
-	encoder.WriteField(hpack.HeaderField{Name: ":scheme", Value: "http"})
-	encoder.WriteField(hpack.HeaderField{Name: ":path", Value: "/"})
-	encoder.WriteField(hpack.HeaderField{Name: ":authority", Value: "www.example.com"})
-
-	headerBlock := buf.Bytes()
-
-	// 优先级信息（5字节）
-	priorityData := make([]byte, 5)
-	if exclusive {
-		dependency |= 0x80000000
-	}
-	priorityData[0] = byte(dependency >> 24)
-	priorityData[1] = byte(dependency >> 16)
-	priorityData[2] = byte(dependency >> 8)
-	priorityData[3] = byte(dependency)
-	priorityData[4] = weight
-
-	// 组合优先级数据和头部块
-	frameData := append(priorityData, headerBlock...)
-
-	// 确保帧数据足够长
-	minFrameSize := 24
-	if len(frameData)+9 < minFrameSize {
-		padding := make([]byte, minFrameSize-len(frameData)-9)
-		frameData = append(frameData, padding...)
-	}
-
-	frame := make([]byte, 9+len(frameData))
-
-	// 帧头
-	frame[0] = byte(len(frameData) >> 16)
-	frame[1] = byte(len(frameData) >> 8)
-	frame[2] = byte(len(frameData))
-	frame[3] = 0x01 // HEADERS
-	frame[4] = 0x24 // END_HEADERS | PRIORITY
-
-	// 流ID
-	frame[5] = byte(streamID >> 24)
-	frame[6] = byte(streamID >> 16)
-	frame[7] = byte(streamID >> 8)
-	frame[8] = byte(streamID)
-
-	// 帧数据
-	copy(frame[9:], frameData)
-
-	return frame
-}
-
-// 辅助函数：创建带指定流ID的DATA帧
-func createDataFrameWithStreamID(t *testing.T, streamID uint32, data []byte, endStream bool) []byte {
-	// 直接使用原始数据，不添加填充
-	frameData := data
-
-	frame := make([]byte, 9+len(frameData))
-
-	// 帧头
-	frame[0] = byte(len(frameData) >> 16)
-	frame[1] = byte(len(frameData) >> 8)
-	frame[2] = byte(len(frameData))
-	frame[3] = 0x00 // DATA
-
-	// 设置标志
-	flags := byte(0)
-	if endStream {
-		flags |= 0x01 // END_STREAM
-	}
-	frame[4] = flags
-
-	// 流ID
-	frame[5] = byte(streamID >> 24)
-	frame[6] = byte(streamID >> 16)
-	frame[7] = byte(streamID >> 8)
-	frame[8] = byte(streamID)
-
-	// 数据
-	copy(frame[9:], frameData)
-
-	return frame
-}
-
-// 辅助函数：创建无效填充的HEADERS帧
-func createInvalidPaddedHeadersFrame(t *testing.T, streamID uint32) []byte {
-	headerBlock := []byte{0x82} // 简单的头部块
-
-	// 创建无效的填充（填充长度大于数据长度）
-	frameData := []byte{255} // 填充长度255，但数据很短
-	frameData = append(frameData, headerBlock...)
-
-	// 确保帧数据足够长
-	minFrameSize := 24
-	if len(frameData)+9 < minFrameSize {
-		padding := make([]byte, minFrameSize-len(frameData)-9)
-		frameData = append(frameData, padding...)
-	}
-
-	frame := make([]byte, 9+len(frameData))
-
-	// 帧头
-	frame[0] = byte(len(frameData) >> 16)
-	frame[1] = byte(len(frameData) >> 8)
-	frame[2] = byte(len(frameData))
-	frame[3] = 0x01 // HEADERS
-	frame[4] = 0x0C // END_HEADERS | PADDED
-
-	// 流ID
-	frame[5] = byte(streamID >> 24)
-	frame[6] = byte(streamID >> 16)
-	frame[7] = byte(streamID >> 8)
-	frame[8] = byte(streamID)
-
-	// 帧数据
-	copy(frame[9:], frameData)
-
-	return frame
-}
-
-// 辅助函数：创建不带END_HEADERS的HEADERS帧
-func createHeadersFrameWithoutEndHeaders(t *testing.T, streamID uint32, customHeaders map[string]string) []byte {
-	// 使用标准库HPACK编码器创建部分头部
-	var buf bytes.Buffer
-	encoder := hpack.NewEncoder(&buf)
-
-	// 只编码部分头部（用于测试CONTINUATION）
-	encoder.WriteField(hpack.HeaderField{Name: ":method", Value: "GET"})
-	encoder.WriteField(hpack.HeaderField{Name: ":scheme", Value: "http"})
-
-	// 编码部分自定义头部
-	for name, value := range customHeaders {
-		encoder.WriteField(hpack.HeaderField{Name: name, Value: value})
-		break // 只编码一个自定义头部，其余留给CONTINUATION
-	}
-
-	headerBlock := buf.Bytes()
-
-	// 确保帧数据足够长
-	minFrameSize := 24
-	if len(headerBlock)+9 < minFrameSize {
-		padding := make([]byte, minFrameSize-len(headerBlock)-9)
-		headerBlock = append(headerBlock, padding...)
-	}
-
-	frame := make([]byte, 9+len(headerBlock))
-
-	// 帧头
-	frame[0] = byte(len(headerBlock) >> 16)
-	frame[1] = byte(len(headerBlock) >> 8)
-	frame[2] = byte(len(headerBlock))
-	frame[3] = 0x01 // HEADERS
-	frame[4] = 0x00 // 没有END_HEADERS标志
-
-	// 流ID
-	frame[5] = byte(streamID >> 24)
-	frame[6] = byte(streamID >> 16)
-	frame[7] = byte(streamID >> 8)
-	frame[8] = byte(streamID)
-
-	// 头部块
-	copy(frame[9:], headerBlock)
-
-	return frame
-}
-
 // 辅助函数：创建CONTINUATION帧
-func createContinuationFrame(t *testing.T, streamID uint32, endHeaders bool) []byte {
-	// 使用标准库HPACK编码器创建剩余头部
-	var buf bytes.Buffer
-	encoder := hpack.NewEncoder(&buf)
+// createContinuationFrame 函数已移动到 test_helpers.go
 
-	// 编码剩余的头部（用于CONTINUATION帧）
-	encoder.WriteField(hpack.HeaderField{Name: ":path", Value: "/"})
-	encoder.WriteField(hpack.HeaderField{Name: ":authority", Value: "www.example.com"})
-
-	headerBlock := buf.Bytes()
-
-	// 确保帧数据足够长
-	minFrameSize := 24
-	if len(headerBlock)+9 < minFrameSize {
-		padding := make([]byte, minFrameSize-len(headerBlock)-9)
-		headerBlock = append(headerBlock, padding...)
-	}
-
-	frame := make([]byte, 9+len(headerBlock))
-
-	// 帧头
-	frame[0] = byte(len(headerBlock) >> 16)
-	frame[1] = byte(len(headerBlock) >> 8)
-	frame[2] = byte(len(headerBlock))
-	frame[3] = 0x09 // CONTINUATION
-
-	// 设置标志
-	flags := byte(0)
-	if endHeaders {
-		flags |= 0x04 // END_HEADERS
-	}
-	frame[4] = flags
-
-	// 流ID
-	frame[5] = byte(streamID >> 24)
-	frame[6] = byte(streamID >> 16)
-	frame[7] = byte(streamID >> 8)
-	frame[8] = byte(streamID)
-
-	// 头部块
-	copy(frame[9:], headerBlock)
-
-	return frame
-}
-
-// 辅助函数：创建响应HEADERS帧
-func createResponseHeadersFrame(t *testing.T, streamID uint32, statusCode int) []byte {
-	// 使用标准库HPACK编码器创建响应头部
-	var buf bytes.Buffer
-	encoder := hpack.NewEncoder(&buf)
-
-	// 编码HTTP/2响应头部
-	encoder.WriteField(hpack.HeaderField{Name: ":status", Value: fmt.Sprintf("%d", statusCode)})
-	encoder.WriteField(hpack.HeaderField{Name: "content-type", Value: "text/html"})
-
-	headerBlock := buf.Bytes()
-
-	// 计算是否需要填充
-	minFrameSize := 24
-	frameDataSize := len(headerBlock)
-	paddingLength := 0
-
-	if frameDataSize+9 < minFrameSize {
-		paddingLength = minFrameSize - frameDataSize - 9 - 1 // -1 for padding length field
-		if paddingLength < 0 {
-			paddingLength = 0
-		}
-	}
-
-	var frameData []byte
-	var flags byte = 0x04 // END_HEADERS
-
-	if paddingLength > 0 {
-		flags |= 0x08 // PADDED
-		frameData = make([]byte, 1+len(headerBlock)+paddingLength)
-		frameData[0] = byte(paddingLength) // padding length
-		copy(frameData[1:], headerBlock)
-		// padding bytes are already zero-initialized
-	} else {
-		frameData = headerBlock
-	}
-
-	frame := make([]byte, 9+len(frameData))
-
-	// 帧头
-	frame[0] = byte(len(frameData) >> 16)
-	frame[1] = byte(len(frameData) >> 8)
-	frame[2] = byte(len(frameData))
-	frame[3] = 0x01 // HEADERS
-	frame[4] = flags
-
-	// 流ID
-	frame[5] = byte(streamID >> 24)
-	frame[6] = byte(streamID >> 16)
-	frame[7] = byte(streamID >> 8)
-	frame[8] = byte(streamID)
-
-	// 帧数据
-	copy(frame[9:], frameData)
-
-	return frame
-}
+// createResponseHeadersFrame 函数已移动到 test_helpers.go
 
 // TestHTTP2HeaderFragmentation 测试HTTP/2头部分片重组
 func TestHTTP2HeaderFragmentation(t *testing.T) {
@@ -610,10 +299,14 @@ func TestHTTP2HeaderFragmentation(t *testing.T) {
 
 		// 创建CONTINUATION帧完成头部
 		continuationFrame := createContinuationFrameWithRemainingHeaders(t, 1, true, customHeaders)
-		req, err := parser.ParseRequest("test-conn", continuationFrame)
+		reqs, err := parser.ParseRequest("test-conn", continuationFrame)
 		if err != nil {
 			t.Skipf("解析CONTINUATION帧失败: %v，可能解析器不支持头部分片重组", err)
 			return
+		}
+		var req *types.HTTPRequest
+		if len(reqs) > 0 {
+			req = reqs[0]
 		}
 
 		if req == nil {
@@ -685,7 +378,7 @@ func TestHTTP2SingleStreamDataFragmentation(t *testing.T) {
 
 		// 发送最后一个DATA帧片段（带END_STREAM）
 		dataFrame3 := createDataFrameWithStreamID(t, 1, fragment3, true)
-		req3, err := parser.ParseRequest("test-conn", dataFrame3)
+		reqs3, err := parser.ParseRequest("test-conn", dataFrame3)
 		if err != nil {
 			t.Fatalf("解析第三个DATA帧失败: %v", err)
 		}
@@ -693,9 +386,10 @@ func TestHTTP2SingleStreamDataFragmentation(t *testing.T) {
 		// 验证数据重组
 		expectedData := string(fragment1) + string(fragment2) + string(fragment3)
 
-		if req3 == nil {
+		if len(reqs3) == 0 {
 			t.Fatal("最后一个DATA帧应该返回完整的请求")
 		}
+		req3 := reqs3[0]
 
 		if string(req3.Body) != expectedData {
 			t.Errorf("数据分片重组失败")
@@ -745,12 +439,13 @@ func TestHTTP2ConcurrentStreamDataFragmentation(t *testing.T) {
 				isLast := i == len(fragments)-1
 				if i < len(fragments) {
 					dataFrame := createDataFrameWithStreamID(t, streamID, []byte(fragments[i]), isLast)
-					req, err := parser.ParseRequest("test-conn", dataFrame)
+					reqs, err := parser.ParseRequest("test-conn", dataFrame)
 					if err != nil {
 						t.Fatalf("解析流%d第%d个DATA帧失败: %v", streamID, i+1, err)
 					}
 
-					if req != nil {
+					if len(reqs) > 0 {
+						req := reqs[0]
 						if req.Complete {
 							t.Logf("流%d第%d个DATA帧重组成功: %s", streamID, i+1, req.Body)
 						} else {
@@ -774,135 +469,8 @@ func TestHTTP2ConcurrentStreamDataFragmentation(t *testing.T) {
 	})
 }
 
-// 辅助函数：创建分片的HEADERS帧
-func createFragmentedHeadersFrame(t *testing.T, streamID uint32, endStream bool, customHeaders map[string]string) []byte {
-	// 使用标准库HPACK编码器创建部分头部
-	var buf bytes.Buffer
-	encoder := hpack.NewEncoder(&buf)
-
-	// 编码所有必需的伪头部和部分自定义头部
-	encoder.WriteField(hpack.HeaderField{Name: ":method", Value: "POST"})
-	encoder.WriteField(hpack.HeaderField{Name: ":scheme", Value: "https"})
-	encoder.WriteField(hpack.HeaderField{Name: ":path", Value: "/test"})
-	encoder.WriteField(hpack.HeaderField{Name: ":authority", Value: "example.com"})
-
-	// 编码部分自定义头部（使用排序确保一致性）
-	var keys []string
-	for name := range customHeaders {
-		keys = append(keys, name)
-	}
-	// 对键进行排序以确保一致的分片行为
-	for i := 0; i < len(keys)-1; i++ {
-		for j := i + 1; j < len(keys); j++ {
-			if keys[i] > keys[j] {
-				keys[i], keys[j] = keys[j], keys[i]
-			}
-		}
-	}
-
-	// 只编码前两个头部，其余留给CONTINUATION
-	for i := 0; i < 2 && i < len(keys); i++ {
-		encoder.WriteField(hpack.HeaderField{Name: keys[i], Value: customHeaders[keys[i]]})
-	}
-
-	headerBlock := buf.Bytes()
-
-	// 确保帧数据足够长
-	minFrameSize := 24
-	if len(headerBlock)+9 < minFrameSize {
-		padding := make([]byte, minFrameSize-len(headerBlock)-9)
-		headerBlock = append(headerBlock, padding...)
-	}
-
-	frame := make([]byte, 9+len(headerBlock))
-
-	// 帧头
-	frame[0] = byte(len(headerBlock) >> 16)
-	frame[1] = byte(len(headerBlock) >> 8)
-	frame[2] = byte(len(headerBlock))
-	frame[3] = 0x01 // HEADERS
-
-	// 设置标志（不设置END_HEADERS，表示后续有CONTINUATION帧）
-	flags := byte(0)
-	if endStream {
-		flags |= 0x01 // END_STREAM
-	}
-	// 注意：不设置END_HEADERS标志
-	frame[4] = flags
-
-	// 流ID
-	frame[5] = byte(streamID >> 24)
-	frame[6] = byte(streamID >> 16)
-	frame[7] = byte(streamID >> 8)
-	frame[8] = byte(streamID)
-
-	// 头部块
-	copy(frame[9:], headerBlock)
-
-	return frame
-}
-
 // 辅助函数：创建包含剩余头部的CONTINUATION帧
-func createContinuationFrameWithRemainingHeaders(t *testing.T, streamID uint32, endHeaders bool, customHeaders map[string]string) []byte {
-	// 使用标准库HPACK编码器创建剩余头部
-	var buf bytes.Buffer
-	encoder := hpack.NewEncoder(&buf)
-
-	// 编码剩余的自定义头部（跳过前两个，使用排序确保一致性）
-	var keys []string
-	for name := range customHeaders {
-		keys = append(keys, name)
-	}
-
-	// 对键进行排序以确保一致的分片行为
-	for i := 0; i < len(keys)-1; i++ {
-		for j := i + 1; j < len(keys); j++ {
-			if keys[i] > keys[j] {
-				keys[i], keys[j] = keys[j], keys[i]
-			}
-		}
-	}
-
-	// 编码剩余的头部（从第3个开始）
-	for i := 2; i < len(keys); i++ {
-		encoder.WriteField(hpack.HeaderField{Name: keys[i], Value: customHeaders[keys[i]]})
-	}
-
-	headerBlock := buf.Bytes()
-
-	// 确保帧数据足够长
-	minFrameSize := 24
-	if len(headerBlock)+9 < minFrameSize {
-		padding := make([]byte, minFrameSize-len(headerBlock)-9)
-		headerBlock = append(headerBlock, padding...)
-	}
-
-	frame := make([]byte, 9+len(headerBlock))
-
-	// 帧头
-	frame[0] = byte(len(headerBlock) >> 16)
-	frame[1] = byte(len(headerBlock) >> 8)
-	frame[2] = byte(len(headerBlock))
-	frame[3] = 0x09 // CONTINUATION
-
-	// 设置标志
-	flags := byte(0)
-	if endHeaders {
-		flags |= 0x04 // END_HEADERS
-	}
-	frame[4] = flags
-
-	// 流ID
-	frame[5] = byte(streamID >> 24)
-	frame[6] = byte(streamID >> 16)
-	frame[7] = byte(streamID >> 8)
-	frame[8] = byte(streamID)
-
-	// 头部块
-	copy(frame[9:], headerBlock)
-
-	return frame
-}
+// createContinuationFrameWithRemainingHeaders 函数已移动到 test_helpers.go
 
 // BenchmarkHTTP2StreamProcessing HTTP/2流处理性能测试
 func BenchmarkHTTP2StreamProcessing(b *testing.B) {

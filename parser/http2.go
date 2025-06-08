@@ -135,25 +135,103 @@ func (p *HTTP2Parser) getOrCreateStream(connID string, streamID uint32) *HTTP2St
 	return stream
 }
 
-// ParseRequest 解析HTTP/2请求
-func (p *HTTP2Parser) ParseRequest(connectionID string, data []byte) (*types.HTTPRequest, error) {
-	// 检查最小帧头长度
-	if len(data) < 9 {
-		return nil, errors.New("data too short for HTTP/2 frame header")
-	}
+// ParseRequest 解析HTTP/2请求 - 统一接口，返回所有解析到的请求
+func (p *HTTP2Parser) ParseRequest(connectionID string, data []byte) ([]*types.HTTPRequest, error) {
+	var requests []*types.HTTPRequest
+	offset := 0
 
-	// 检查连接前导（只在连接开始时）
+	// 检查连接前导
 	if len(data) >= 24 && bytes.HasPrefix(data, []byte("PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")) {
-		return p.parseConnectionPreface(connectionID, data)
+		offset = 24
+		// 创建PRI请求对象
+		priRequest := &types.HTTPRequest{
+			HTTPMessage: types.HTTPMessage{
+				Proto:      "HTTP/2.0",
+				ProtoMajor: 2,
+				ProtoMinor: 0,
+				Headers:    make(http.Header),
+				Timestamp:  time.Now(),
+				Complete:   true,
+			},
+			Method: "PRI",
+			URL:    &url.URL{Path: "*"},
+		}
+		requests = append(requests, priRequest)
+		// 如果只有连接前导，返回PRI请求
+		if len(data) == 24 {
+			return requests, nil
+		}
 	}
 
-	// 解析普通帧（最小9字节）
-	return p.parseFrames(connectionID, data)
+	// 循环解析所有帧
+	for offset < len(data) {
+		// 检查是否有足够的数据解析帧头
+		if len(data[offset:]) < 9 {
+			break // 不完整的帧头，等待更多数据
+		}
+
+		header, err := http2.ParseFrameHeader(data[offset:])
+		if err != nil {
+			return requests, err
+		}
+
+		frameEnd := offset + 9 + int(header.Length)
+		if frameEnd > len(data) {
+			break // 不完整的帧数据，等待更多数据
+		}
+
+		frameData := data[offset+9 : frameEnd]
+		req, err := p.parseFrame(connectionID, header, frameData)
+		if err != nil {
+			return requests, err
+		}
+
+		if req != nil {
+			requests = append(requests, req)
+		}
+
+		offset = frameEnd
+	}
+
+	return requests, nil
 }
 
-// ParseResponse 解析HTTP/2响应
-func (p *HTTP2Parser) ParseResponse(connectionID string, data []byte) (*types.HTTPResponse, error) {
-	return p.parseFramesForResponse(connectionID, data)
+// ParseResponse 解析HTTP/2响应 - 统一接口，返回所有解析到的响应
+func (p *HTTP2Parser) ParseResponse(connectionID string, data []byte) ([]*types.HTTPResponse, error) {
+	var responses []*types.HTTPResponse
+	offset := 0
+
+	// 循环解析所有帧
+	for offset < len(data) {
+		// 检查是否有足够的数据解析帧头
+		if len(data[offset:]) < 9 {
+			break // 不完整的帧头，等待更多数据
+		}
+
+		header, err := http2.ParseFrameHeader(data[offset:])
+		if err != nil {
+			return responses, err
+		}
+
+		frameEnd := offset + 9 + int(header.Length)
+		if frameEnd > len(data) {
+			break // 不完整的帧数据，等待更多数据
+		}
+
+		frameData := data[offset+9 : frameEnd]
+		resp, err := p.parseResponseFrame(connectionID, header, frameData)
+		if err != nil {
+			return responses, err
+		}
+
+		if resp != nil {
+			responses = append(responses, resp)
+		}
+
+		offset = frameEnd
+	}
+
+	return responses, nil
 }
 
 // IsComplete 检查数据是否完整
@@ -184,70 +262,6 @@ func (p *HTTP2Parser) GetRequiredBytes(data []byte) int {
 	}
 
 	return int(9 + header.Length)
-}
-
-// parseConnectionPreface 解析连接前导
-func (p *HTTP2Parser) parseConnectionPreface(connectionID string, data []byte) (*types.HTTPRequest, error) {
-	preface := "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
-	if len(data) < len(preface) {
-		return nil, errors.New("incomplete connection preface")
-	}
-
-	if !bytes.HasPrefix(data, []byte(preface)) {
-		return nil, errors.New("invalid connection preface")
-	}
-
-	// 创建连接前导请求
-	request := &types.HTTPRequest{
-		Method:     "PRI",
-		URL:        &url.URL{Path: "*"},
-		Proto:      "HTTP/2.0",
-		ProtoMajor: 2,
-		ProtoMinor: 0,
-		Headers:    make(http.Header),
-		Body:       data[len(preface):],
-		Timestamp:  time.Now(),
-		Complete:   true,
-		RawData:    data,
-	}
-
-	return request, nil
-}
-
-// parseFrames 解析HTTP/2帧
-func (p *HTTP2Parser) parseFrames(connectionID string, data []byte) (*types.HTTPRequest, error) {
-	offset := 0
-	var request *types.HTTPRequest
-
-	for offset < len(data) {
-		if len(data[offset:]) < 9 {
-			break
-		}
-
-		header, err := http2.ParseFrameHeader(data[offset:])
-		if err != nil {
-			return nil, err
-		}
-
-		frameEnd := offset + 9 + int(header.Length)
-		if frameEnd > len(data) {
-			break
-		}
-
-		frameData := data[offset+9 : frameEnd]
-		req, err := p.parseFrame(connectionID, header, frameData)
-		if err != nil {
-			return nil, err
-		}
-
-		if req != nil {
-			request = req
-		}
-
-		offset = frameEnd
-	}
-
-	return request, nil
 }
 
 // parseFrame 解析单个帧
@@ -451,13 +465,15 @@ func (p *HTTP2Parser) decodeCompleteHeaders(connectionID string, stream *HTTP2St
 
 	// 构建HTTP请求
 	request := &types.HTTPRequest{
-		Headers:    headers,
-		Proto:      "HTTP/2.0",
-		ProtoMajor: 2,
-		ProtoMinor: 0,
-		Timestamp:  time.Now(),
-		StreamID:   &stream.ID,
-		RawData:    completeHeaderBlock,
+		HTTPMessage: types.HTTPMessage{
+			Headers:    headers,
+			Proto:      "HTTP/2.0",
+			ProtoMajor: 2,
+			ProtoMinor: 0,
+			Timestamp:  time.Now(),
+			StreamID:   &stream.ID,
+			RawData:    completeHeaderBlock,
+		},
 	}
 
 	// 提取伪头部
@@ -507,42 +523,6 @@ func (p *HTTP2Parser) decodeCompleteHeaders(connectionID string, stream *HTTP2St
 	return request, nil
 }
 
-// parseFramesForResponse 解析HTTP/2响应帧
-func (p *HTTP2Parser) parseFramesForResponse(connectionID string, data []byte) (*types.HTTPResponse, error) {
-	offset := 0
-	var response *types.HTTPResponse
-
-	for offset < len(data) {
-		if len(data[offset:]) < 9 {
-			break
-		}
-
-		header, err := http2.ParseFrameHeader(data[offset:])
-		if err != nil {
-			return nil, err
-		}
-
-		frameEnd := offset + 9 + int(header.Length)
-		if frameEnd > len(data) {
-			break
-		}
-
-		frameData := data[offset+9 : frameEnd]
-		resp, err := p.parseResponseFrame(connectionID, header, frameData)
-		if err != nil {
-			return nil, err
-		}
-
-		if resp != nil {
-			response = resp
-		}
-
-		offset = frameEnd
-	}
-
-	return response, nil
-}
-
 // parseResponseFrame 解析响应帧
 func (p *HTTP2Parser) parseResponseFrame(connectionID string, header http2.FrameHeader, data []byte) (*types.HTTPResponse, error) {
 	switch header.Type {
@@ -586,14 +566,16 @@ func (p *HTTP2Parser) parseResponseHeadersFrame(connectionID string, header http
 	}
 
 	// 解码头部块
-	// 获取连接
+	// 获取或创建连接
 	connection, ok := p.GetConnection(connectionID)
 	if !ok {
-		// 通常，在解析响应头之前，连接应该已经存在
-		// 但为了健壮性，我们创建一个新的（如果需要）或返回错误
-		// 这里假设 getOrCreateStream 已经处理了连接的创建和 hpackDecoder 的初始化
-		// 或者我们可以选择在这里返回一个错误，指示连接未找到
-		return nil, fmt.Errorf("connection not found for ID: %s", connectionID)
+		// 创建新连接
+		connection = &HTTP2Connection{
+			ID:           connectionID,
+			streams:      make(map[uint32]*HTTP2Stream),
+			hpackDecoder: hpack.NewDecoder(4096, nil),
+		}
+		p.SetConnection(connectionID, connection)
 	}
 	// 使用互斥锁保护hpackDecoder
 	connection.hpackMux.Lock()
@@ -611,13 +593,15 @@ func (p *HTTP2Parser) parseResponseHeadersFrame(connectionID string, header http
 
 	// 构建HTTP响应
 	response := &types.HTTPResponse{
-		Headers:    headers,
-		Proto:      "HTTP/2.0",
-		ProtoMajor: 2,
-		ProtoMinor: 0,
-		Timestamp:  time.Now(),
-		StreamID:   &header.StreamID,
-		RawData:    data,
+		HTTPMessage: types.HTTPMessage{
+			Headers:    headers,
+			Proto:      "HTTP/2.0",
+			ProtoMajor: 2,
+			ProtoMinor: 0,
+			Timestamp:  time.Now(),
+			StreamID:   &header.StreamID,
+			RawData:    data,
+		},
 	}
 
 	// 提取状态码
@@ -640,6 +624,10 @@ func (p *HTTP2Parser) parseResponseHeadersFrame(connectionID string, header http
 
 	// 检查是否结束流
 	response.Complete = header.Flags&http2.FlagHeadersEndStream != 0
+
+	// 获取或创建流，并保存响应对象
+	stream := p.getOrCreateStream(connectionID, header.StreamID)
+	stream.Response = response
 
 	return response, nil
 }
@@ -667,13 +655,58 @@ func (p *HTTP2Parser) parseResponseDataFrame(connectionID string, header http2.F
 		data = data[offset:]
 	}
 
-	// 创建包含数据的响应片段
-	response := &types.HTTPResponse{
-		Body:      data,
-		Timestamp: time.Now(),
-		StreamID:  &header.StreamID,
-		Complete:  header.Flags&http2.FlagDataEndStream != 0,
-		RawData:   data,
+	// 获取或创建流
+	stream := p.getOrCreateStream(connectionID, header.StreamID)
+
+	// 累积响应数据片段
+	if len(data) > 0 {
+		stream.DataFragments = append(stream.DataFragments, data)
+		stream.TotalDataLength += int64(len(data))
+	}
+
+	// 检查是否结束流
+	stream.EndStream = header.Flags&http2.FlagDataEndStream != 0
+
+	// 如果流中已有响应对象（来自HEADERS帧），使用它；否则创建新的响应对象
+	var response *types.HTTPResponse
+	if stream.Response != nil {
+		// 使用已有的响应对象，包含头部信息
+		response = stream.Response
+		// 更新数据相关字段
+		response.Body = data
+		response.Complete = stream.EndStream
+		response.RawData = data
+	} else {
+		// 创建新的响应对象（仅包含数据）
+		response = &types.HTTPResponse{
+			HTTPMessage: types.HTTPMessage{
+				Body:      data,
+				Timestamp: time.Now(),
+				StreamID:  &header.StreamID,
+				Complete:  stream.EndStream,
+				RawData:   data,
+			},
+		}
+		stream.Response = response
+	}
+
+	// 如果流结束，合并所有数据片段
+	if stream.EndStream && len(stream.DataFragments) > 1 {
+		// 计算总长度
+		totalLen := 0
+		for _, fragment := range stream.DataFragments {
+			totalLen += len(fragment)
+		}
+
+		// 合并所有片段
+		combinedData := make([]byte, 0, totalLen)
+		for _, fragment := range stream.DataFragments {
+			combinedData = append(combinedData, fragment...)
+		}
+
+		// 更新响应体为完整数据
+		response.Body = combinedData
+		response.RawData = combinedData
 	}
 
 	return response, nil
@@ -777,92 +810,17 @@ func (p *HTTP2Parser) buildDataRequest(stream *HTTP2Stream) (*types.HTTPRequest,
 
 	// 否则创建新的数据请求
 	request := &types.HTTPRequest{
-		Body:      completeData,
-		Timestamp: time.Now(),
-		StreamID:  &stream.ID,
-		Complete:  stream.EndStream,
-		RawData:   completeData,
+		HTTPMessage: types.HTTPMessage{
+			Body:      completeData,
+			Timestamp: time.Now(),
+			StreamID:  &stream.ID,
+			Complete:  stream.EndStream,
+			RawData:   completeData,
+		},
 	}
 
 	stream.Request = request
 	return request, nil
-}
-
-// ParseAllRequests 解析所有HTTP/2请求流
-func (p *HTTP2Parser) ParseAllRequests(data []byte) ([]*types.HTTPRequest, error) {
-	var requests []*types.HTTPRequest
-	offset := 0
-
-	// 检查连接前导
-	if len(data) >= 24 && bytes.HasPrefix(data, []byte("PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")) {
-		offset = 24
-	}
-
-	for offset < len(data) {
-		if len(data[offset:]) < 9 {
-			break
-		}
-
-		header, err := http2.ParseFrameHeader(data[offset:])
-		if err != nil {
-			return requests, err
-		}
-
-		frameEnd := offset + 9 + int(header.Length)
-		if frameEnd > len(data) {
-			break
-		}
-
-		frameData := data[offset+9 : frameEnd]
-		req, err := p.parseFrame("unknown", header, frameData)
-		if err != nil {
-			return requests, err
-		}
-
-		if req != nil {
-			requests = append(requests, req)
-		}
-
-		offset = frameEnd
-	}
-
-	return requests, nil
-}
-
-// ParseAllResponses 解析所有HTTP/2响应流
-func (p *HTTP2Parser) ParseAllResponses(data []byte) ([]*types.HTTPResponse, error) {
-	var responses []*types.HTTPResponse
-	offset := 0
-
-	for offset < len(data) {
-		if len(data[offset:]) < 9 {
-			break
-		}
-
-		header, err := http2.ParseFrameHeader(data[offset:])
-		if err != nil {
-			return responses, err
-		}
-
-		frameEnd := offset + 9 + int(header.Length)
-		if frameEnd > len(data) {
-			break
-		}
-
-		frameData := data[offset+9 : frameEnd]
-		resp, err := p.parseResponseFrame("unknown", header, frameData)
-		if err != nil {
-			return responses, err
-		}
-
-		if resp != nil {
-			responses = append(responses, resp)
-		}
-
-		offset = frameEnd
-	}
-
-	return responses, nil
 }
 
 func validateFrameFlags(frameType, flags byte) bool {

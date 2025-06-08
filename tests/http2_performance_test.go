@@ -69,9 +69,13 @@ func TestFragmentedFrameReassembly(t *testing.T) {
 		continuationFrames := createMultipleContinuationFrames(t, 1, 5) // 5个CONTINUATION帧
 
 		// 解析初始HEADERS帧
-		req, err := parser.ParseRequest(connID, headersFrame)
+		reqs, err := parser.ParseRequest(connID, headersFrame)
 		if err != nil {
 			t.Fatalf("解析分片HEADERS帧失败: %v", err)
+		}
+		var req *types.HTTPRequest
+		if len(reqs) > 0 {
+			req = reqs[0]
 		}
 		if req != nil {
 			t.Error("分片HEADERS帧不应立即返回完整请求")
@@ -79,9 +83,14 @@ func TestFragmentedFrameReassembly(t *testing.T) {
 
 		// 逐个解析CONTINUATION帧
 		for i, contFrame := range continuationFrames {
-			req, err = parser.ParseRequest(connID, contFrame)
+			reqs, err = parser.ParseRequest(connID, contFrame)
 			if err != nil {
 				t.Fatalf("解析CONTINUATION帧 %d 失败: %v", i, err)
+			}
+			if len(reqs) > 0 {
+				req = reqs[0]
+			} else {
+				req = nil
 			}
 			// 只有最后一个CONTINUATION帧应该返回完整请求
 			if i < len(continuationFrames)-1 && req != nil {
@@ -118,9 +127,13 @@ func TestFragmentedFrameReassembly(t *testing.T) {
 				fragment[4] |= 0x01
 			}
 
-			resp, err := parser.ParseResponse(connID, fragment)
+			resps, err := parser.ParseResponse(connID, fragment)
 			if err != nil {
 				t.Fatalf("解析DATA片段 %d 失败: %v", i, err)
+			}
+			var resp *types.HTTPResponse
+			if len(resps) > 0 {
+				resp = resps[0]
 			}
 
 			// 累积数据用于验证
@@ -172,15 +185,16 @@ func TestConcurrentStreamProcessing(t *testing.T) {
 
 				// 创建HEADERS帧
 				headersFrame := createConcurrentTestFrame(t, streamID, true, true, goroutineID, i)
-				req, err := sharedParser.ParseRequest(connID, headersFrame)
+				reqs, err := sharedParser.ParseRequest(connID, headersFrame)
 				if err != nil {
 					errorChan <- fmt.Errorf("goroutine %d, stream %d: %v", goroutineID, streamID, err)
 					return
 				}
-				if req == nil {
-					errorChan <- fmt.Errorf("goroutine %d, stream %d: 返回nil", goroutineID, streamID)
+				if len(reqs) == 0 {
+					errorChan <- fmt.Errorf("goroutine %d, stream %d: 返回空数组", goroutineID, streamID)
 					return
 				}
+				req := reqs[0]
 				if *req.StreamID != streamID {
 					errorChan <- fmt.Errorf("goroutine %d: 期望流ID %d，实际 %d", goroutineID, streamID, *req.StreamID)
 					return
@@ -262,14 +276,26 @@ func TestMemoryUsageUnderLoad(t *testing.T) {
 	runtime.GC()
 	runtime.ReadMemStats(&m2)
 
-	memoryIncrease := m2.Alloc - m1.Alloc
-	memoryPerStream := memoryIncrease / uint64(numStreams)
+	// 安全计算内存增长，避免uint64下溢
+	var memoryIncrease uint64
+	if m2.Alloc > m1.Alloc {
+		memoryIncrease = m2.Alloc - m1.Alloc
+	} else {
+		// 如果内存减少了，说明GC回收了更多内存，设为0
+		memoryIncrease = 0
+	}
+
+	var memoryPerStream uint64
+	if numStreams > 0 {
+		memoryPerStream = memoryIncrease / uint64(numStreams)
+	}
 
 	t.Logf("处理 %d 个流，内存增长: %d bytes (%.2f KB)", numStreams, memoryIncrease, float64(memoryIncrease)/1024)
 	t.Logf("平均每流内存使用: %d bytes", memoryPerStream)
 
 	// 验证内存使用合理性（每流不应超过100KB）
-	if memoryPerStream > 100*1024 {
+	// 只有在实际有内存增长时才检查
+	if memoryIncrease > 0 && memoryPerStream > 100*1024 {
 		t.Errorf("每流内存使用过高: %d bytes > 100KB", memoryPerStream)
 	}
 }
@@ -362,90 +388,6 @@ func BenchmarkFrameReassembly(b *testing.B) {
 			}
 		})
 	}
-}
-
-// 辅助函数：创建大型HEADERS帧
-func createLargeHeadersFrame(t *testing.T, streamID uint32, endStream, endHeaders bool) []byte {
-	// 创建包含大量头部的HEADERS帧
-	var buf bytes.Buffer
-	encoder := hpack.NewEncoder(&buf)
-
-	// 标准头部
-	encoder.WriteField(hpack.HeaderField{Name: ":method", Value: "POST"})
-	encoder.WriteField(hpack.HeaderField{Name: ":path", Value: "/api/v1/large-data"})
-	encoder.WriteField(hpack.HeaderField{Name: ":scheme", Value: "https"})
-	encoder.WriteField(hpack.HeaderField{Name: ":authority", Value: "example.com"})
-
-	// 添加大量自定义头部
-	for i := 0; i < 50; i++ {
-		encoder.WriteField(hpack.HeaderField{
-			Name:  fmt.Sprintf("x-custom-header-%d", i),
-			Value: fmt.Sprintf("large-value-for-testing-performance-%d", i),
-		})
-	}
-
-	headerBlock := buf.Bytes()
-	frame := make([]byte, 9+len(headerBlock))
-
-	// 帧头
-	frame[0] = byte(len(headerBlock) >> 16)
-	frame[1] = byte(len(headerBlock) >> 8)
-	frame[2] = byte(len(headerBlock))
-	frame[3] = 0x01 // HEADERS
-
-	// 标志
-	flags := byte(0)
-	if endStream {
-		flags |= 0x01 // END_STREAM
-	}
-	if endHeaders {
-		flags |= 0x04 // END_HEADERS
-	}
-	frame[4] = flags
-
-	// 流ID
-	frame[5] = byte(streamID >> 24)
-	frame[6] = byte(streamID >> 16)
-	frame[7] = byte(streamID >> 8)
-	frame[8] = byte(streamID)
-
-	// 头部块
-	copy(frame[9:], headerBlock)
-
-	return frame
-}
-
-// 辅助函数：创建大型DATA帧
-func createLargeDataFrame(t *testing.T, streamID uint32, size int, endStream bool) []byte {
-	// 创建指定大小的随机数据
-	data := make([]byte, size)
-	rand.Read(data)
-
-	frame := make([]byte, 9+size)
-
-	// 帧头
-	frame[0] = byte(size >> 16)
-	frame[1] = byte(size >> 8)
-	frame[2] = byte(size)
-	frame[3] = 0x00 // DATA
-
-	// 标志
-	flags := byte(0)
-	if endStream {
-		flags |= 0x01 // END_STREAM
-	}
-	frame[4] = flags
-
-	// 流ID
-	frame[5] = byte(streamID >> 24)
-	frame[6] = byte(streamID >> 16)
-	frame[7] = byte(streamID >> 8)
-	frame[8] = byte(streamID)
-
-	// 数据
-	copy(frame[9:], data)
-
-	return frame
 }
 
 // 辅助函数：创建分片的HEADERS帧（性能测试版本）

@@ -30,7 +30,7 @@ func NewHTTP1ParserWithVersion(version types.HTTPVersion) *HTTP1Parser {
 }
 
 // ParseRequest 解析HTTP请求
-func (p *HTTP1Parser) ParseRequest(connectionID string, data []byte) (*types.HTTPRequest, error) {
+func (p *HTTP1Parser) ParseRequest(connectionID string, data []byte) ([]*types.HTTPRequest, error) {
 	if len(data) == 0 {
 		return nil, errors.New("empty data")
 	}
@@ -124,16 +124,18 @@ func (p *HTTP1Parser) ParseRequest(connectionID string, data []byte) (*types.HTT
 
 	// 创建请求对象
 	request := &types.HTTPRequest{
-		Method:        method,
-		URL:           parsedURL,
-		Proto:         proto,
-		ProtoMajor:    protoMajor,
-		ProtoMinor:    protoMinor,
-		Headers:       headers,
-		ContentLength: contentLength,
-		Timestamp:     time.Now(),
-		RawData:       make([]byte, len(data)),
-		Complete:      false,
+		HTTPMessage: types.HTTPMessage{
+			Proto:         proto,
+			ProtoMajor:    protoMajor,
+			ProtoMinor:    protoMinor,
+			Headers:       headers,
+			ContentLength: contentLength,
+			Timestamp:     time.Now(),
+			RawData:       make([]byte, len(data)),
+			Complete:      false,
+		},
+		Method: method,
+		URL:    parsedURL,
 	}
 	copy(request.RawData, data)
 
@@ -142,11 +144,11 @@ func (p *HTTP1Parser) ParseRequest(connectionID string, data []byte) (*types.HTT
 		return nil, err
 	}
 
-	return request, nil
+	return []*types.HTTPRequest{request}, nil
 }
 
 // ParseResponse 解析HTTP响应
-func (p *HTTP1Parser) ParseResponse(connectionID string, data []byte) (*types.HTTPResponse, error) {
+func (p *HTTP1Parser) ParseResponse(connectionID string, data []byte) ([]*types.HTTPResponse, error) {
 	if len(data) == 0 {
 		return nil, errors.New("empty data")
 	}
@@ -238,18 +240,20 @@ func (p *HTTP1Parser) ParseResponse(connectionID string, data []byte) (*types.HT
 
 	// 创建响应对象
 	response := &types.HTTPResponse{
+		HTTPMessage: types.HTTPMessage{
+			Proto:         proto,
+			ProtoMajor:    protoMajor,
+			ProtoMinor:    protoMinor,
+			Headers:       headers,
+			ContentLength: contentLength,
+			Timestamp:     time.Now(),
+			RawData:       make([]byte, len(data)),
+			Complete:      false,
+		},
 		StatusCode:       statusCode,
 		Status:           status,
-		Proto:            proto,
-		ProtoMajor:       protoMajor,
-		ProtoMinor:       protoMinor,
-		Headers:          headers,
-		ContentLength:    contentLength,
 		TransferEncoding: transferEncoding,
 		Chunked:          chunked,
-		Timestamp:        time.Now(),
-		RawData:          make([]byte, len(data)),
-		Complete:         false,
 		Chunks:           make([]*types.ChunkInfo, 0),
 	}
 	copy(response.RawData, data)
@@ -259,7 +263,7 @@ func (p *HTTP1Parser) ParseResponse(connectionID string, data []byte) (*types.HT
 		return nil, err
 	}
 
-	return response, nil
+	return []*types.HTTPResponse{response}, nil
 }
 
 // DetectVersion 检测HTTP版本
