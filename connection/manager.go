@@ -468,62 +468,91 @@ func (m *Manager) looksLikeHTTPData(data []byte) bool {
 
 // parseHTTP2Messages 解析HTTP/2消息 - 多帧处理
 func (m *Manager) parseHTTP2Messages(conn *Connection, data []byte) error {
-	// HTTP/2的解析逻辑 - 统一接口处理
-	if conn.LastDirection == types.DirectionRequest {
-		// 解析所有请求帧
-		if http2Parser, ok := conn.Parser.(*parser.HTTP2Parser); ok {
-			if requests, err := http2Parser.ParseRequest(conn.ID, data); err == nil {
-				// 处理所有请求
-				for _, request := range requests {
-					if request != nil {
-						if err := m.handleParsedRequest(conn, request); err != nil {
-							if m.callbacks != nil && m.callbacks.OnError != nil {
-								m.callbacks.OnError(fmt.Errorf("failed to handle request for stream %d: %w", *request.StreamID, err))
-							}
-						}
-					}
-				}
-				return nil
-			} else {
-				// 对于HTTP/2，某些错误是可以接受的（如不完整的帧数据）
-				if err.Error() == "insufficient data for frame header" || err.Error() == "incomplete frame data" {
-					return nil // 等待更多数据
-				}
-				// 对于连接前导，也是正常的
-				if bytes.HasPrefix(data, []byte("PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")) {
-					return nil // 连接前导是正常的
-				}
-				// 其他错误可能需要记录，但不中断处理
-				return nil
-			}
-		}
-	} else if conn.LastDirection == types.DirectionResponse {
-		// 解析所有响应帧
-		if http2Parser, ok := conn.Parser.(*parser.HTTP2Parser); ok {
-			if responses, err := http2Parser.ParseResponse(conn.ID, data); err == nil {
-				// 处理所有响应
-				for _, response := range responses {
-					if response != nil {
-						if err := m.handleParsedResponse(conn, response); err != nil {
-							if m.callbacks != nil && m.callbacks.OnError != nil {
-								m.callbacks.OnError(fmt.Errorf("failed to handle response for stream %d: %w", *response.StreamID, err))
-							}
-						}
-					}
-				}
-				return nil
-			} else {
-				// 对于HTTP/2，某些错误是可以接受的（如不完整的帧数据）
-				if err.Error() == "insufficient data for frame header" || err.Error() == "incomplete frame data" {
-					return nil // 等待更多数据
-				}
-				// 其他错误可能需要记录，但不中断处理
-				return nil
+	// 获取HTTP/2解析器
+	http2Parser, ok := conn.Parser.(*parser.HTTP2Parser)
+	if !ok {
+		return nil
+	}
+
+	// 根据方向处理不同类型的消息
+	switch conn.LastDirection {
+	case types.DirectionRequest:
+		return m.parseHTTP2Requests(conn, http2Parser, data)
+	case types.DirectionResponse:
+		return m.parseHTTP2Responses(conn, http2Parser, data)
+	default:
+		return nil
+	}
+}
+
+// parseHTTP2Requests 解析HTTP/2请求帧
+func (m *Manager) parseHTTP2Requests(conn *Connection, parser *parser.HTTP2Parser, data []byte) error {
+	requests, err := parser.ParseRequest(conn.ID, data)
+	if err != nil {
+		return m.handleHTTP2ParseError(err, data)
+	}
+
+	// 处理所有请求
+	for _, request := range requests {
+		if request != nil {
+			if err := m.handleParsedRequest(conn, request); err != nil {
+				m.reportError(fmt.Errorf("failed to handle request for stream %d: %w", *request.StreamID, err))
 			}
 		}
 	}
-
 	return nil
+}
+
+// parseHTTP2Responses 解析HTTP/2响应帧
+func (m *Manager) parseHTTP2Responses(conn *Connection, parser *parser.HTTP2Parser, data []byte) error {
+	responses, err := parser.ParseResponse(conn.ID, data)
+	if err != nil {
+		return m.handleHTTP2ParseError(err, data)
+	}
+
+	// 处理所有响应
+	for _, response := range responses {
+		if response != nil {
+			if err := m.handleParsedResponse(conn, response); err != nil {
+				m.reportError(fmt.Errorf("failed to handle response for stream %d: %w", *response.StreamID, err))
+			}
+		}
+	}
+	return nil
+}
+
+// handleHTTP2ParseError 处理HTTP/2解析错误
+func (m *Manager) handleHTTP2ParseError(err error, data []byte) error {
+	// 检查是否为可接受的错误（不完整的帧数据）
+	if m.isAcceptableHTTP2Error(err) {
+		return nil // 等待更多数据
+	}
+
+	// 检查是否为HTTP/2连接前导
+	if m.isHTTP2ConnectionPreface(data) {
+		return nil // 连接前导是正常的
+	}
+
+	// 其他错误不中断处理，但可以记录
+	return nil
+}
+
+// isAcceptableHTTP2Error 检查是否为可接受的HTTP/2错误
+func (m *Manager) isAcceptableHTTP2Error(err error) bool {
+	errorMsg := err.Error()
+	return errorMsg == "insufficient data for frame header" || errorMsg == "incomplete frame data"
+}
+
+// isHTTP2ConnectionPreface 检查是否为HTTP/2连接前导
+func (m *Manager) isHTTP2ConnectionPreface(data []byte) bool {
+	return bytes.HasPrefix(data, []byte("PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"))
+}
+
+// reportError 报告错误给回调函数
+func (m *Manager) reportError(err error) {
+	if m.callbacks != nil && m.callbacks.OnError != nil {
+		m.callbacks.OnError(err)
+	}
 }
 
 // parseRequestMessage 解析请求消息

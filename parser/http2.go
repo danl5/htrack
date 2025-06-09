@@ -135,7 +135,7 @@ func (p *HTTP2Parser) getOrCreateStream(connID string, streamID uint32) *HTTP2St
 	return stream
 }
 
-// ParseRequest 解析HTTP/2请求 - 统一接口，返回所有解析到的请求
+// ParseRequest 解析HTTP/2请求
 func (p *HTTP2Parser) ParseRequest(connectionID string, data []byte) ([]*types.HTTPRequest, error) {
 	var requests []*types.HTTPRequest
 	offset := 0
