@@ -19,39 +19,37 @@ func TestLargeDataFrameProcessing(t *testing.T) {
 	parser := parser.NewHTTP2Parser()
 	connID := "large-data-test"
 
-	// 测试不同大小的数据帧
-	dataSizes := []int{1024, 8192, 65536, 1048576} // 1KB, 8KB, 64KB, 1MB
+	// 测试不同大小的数据帧（限制在HTTP/2最大帧大小16KB内）
+	dataSizes := []int{1024, 8192, 16000} // 1KB, 8KB, ~16KB
 
-	for _, size := range dataSizes {
+	for i, size := range dataSizes {
 		t.Run(fmt.Sprintf("DataSize_%dB", size), func(t *testing.T) {
-			// 创建HEADERS帧建立流
-			headersFrame := createLargeHeadersFrame(t, 1, false, true)
-			req, err := parser.ParseRequest(connID, headersFrame)
+			// 为每个子测试使用不同的streamID避免冲突
+			streamID := uint32(i + 1)
+			// 创建HEADERS帧（不带END_STREAM），然后创建DATA帧（带END_STREAM）
+			headersFrame := createLargeHeadersFrame(t, streamID, false, true)
+			_, err := parser.ParseRequest(connID, headersFrame)
 			if err != nil {
 				t.Fatalf("解析HEADERS帧失败: %v", err)
 			}
-			if req == nil {
-				t.Fatal("HEADERS帧解析返回nil")
-			}
 
-			// 创建大数据帧
-			dataFrame := createLargeDataFrame(t, 1, size, true)
+			// 创建大数据帧测试数据处理性能
+			dataFrame := createLargeDataFrame(t, streamID, size, true)
 			start := time.Now()
-			resp, err := parser.ParseResponse(connID, dataFrame)
+			reqs, err := parser.ParseRequest(connID, dataFrame)
 			duration := time.Since(start)
-
 			if err != nil {
 				t.Fatalf("解析大数据帧失败 (size=%d): %v", size, err)
 			}
-			if resp == nil {
-				t.Fatalf("大数据帧解析返回nil (size=%d)", size)
+			if len(reqs) == 0 {
+				t.Fatalf("大数据帧解析返回空数组 (size=%d)", size)
 			}
 
 			t.Logf("处理 %d 字节数据帧耗时: %v", size, duration)
 
-			// 验证性能要求：1MB数据应在100ms内处理完成
-			if size >= 1048576 && duration > 100*time.Millisecond {
-				t.Errorf("大数据帧处理性能不足: %v > 100ms", duration)
+			// 验证性能要求：16KB数据应在10ms内处理完成
+			if size >= 16000 && duration > 10*time.Millisecond {
+				t.Errorf("大数据帧处理性能不足: %v > 10ms", duration)
 			}
 		})
 	}
@@ -73,12 +71,9 @@ func TestFragmentedFrameReassembly(t *testing.T) {
 		if err != nil {
 			t.Fatalf("解析分片HEADERS帧失败: %v", err)
 		}
-		var req *types.HTTPRequest
-		if len(reqs) > 0 {
-			req = reqs[0]
-		}
-		if req != nil {
-			t.Error("分片HEADERS帧不应立即返回完整请求")
+		// 分片HEADERS帧应该返回空数组
+		if len(reqs) != 0 {
+			t.Errorf("分片HEADERS帧应该返回空数组，实际返回%d个请求", len(reqs))
 		}
 
 		// 逐个解析CONTINUATION帧
@@ -87,20 +82,23 @@ func TestFragmentedFrameReassembly(t *testing.T) {
 			if err != nil {
 				t.Fatalf("解析CONTINUATION帧 %d 失败: %v", i, err)
 			}
-			if len(reqs) > 0 {
-				req = reqs[0]
-			} else {
-				req = nil
-			}
-			// 只有最后一个CONTINUATION帧应该返回完整请求
-			if i < len(continuationFrames)-1 && req != nil {
-				t.Errorf("CONTINUATION帧 %d 不应返回完整请求", i)
+			// CONTINUATION帧没有END_STREAM标志，应该返回空数组
+			if len(reqs) != 0 {
+				t.Errorf("CONTINUATION帧 %d 应该返回空数组，实际返回%d个请求", i, len(reqs))
 			}
 		}
 
-		if req == nil {
+		// 发送DATA帧完成请求
+		data := []byte("test data")
+		dataFrame := createDataFrameWithStreamID(t, 1, data, true)
+		reqs, err = parser.ParseRequest(connID, dataFrame)
+		if err != nil {
+			t.Fatalf("解析DATA帧失败: %v", err)
+		}
+		if len(reqs) == 0 {
 			t.Fatal("分片重组后应返回完整请求")
 		}
+		req := reqs[0]
 		if *req.StreamID != 1 {
 			t.Errorf("期望流ID为1，实际为: %d", *req.StreamID)
 		}
@@ -108,18 +106,22 @@ func TestFragmentedFrameReassembly(t *testing.T) {
 
 	// 测试DATA帧分片重组
 	t.Run("DataFragmentation", func(t *testing.T) {
-		// 先建立流
+		// 先建立流（不带END_STREAM标志）
 		headersFrame := createLargeHeadersFrame(t, 3, false, true)
-		_, err := parser.ParseRequest(connID, headersFrame)
+		reqs, err := parser.ParseRequest(connID, headersFrame)
 		if err != nil {
 			t.Fatalf("建立流失败: %v", err)
+		}
+		// HEADERS帧没有END_STREAM标志，应该返回空数组
+		if len(reqs) != 0 {
+			t.Errorf("HEADERS帧应该返回空数组，实际返回%d个请求", len(reqs))
 		}
 
 		// 创建多个DATA帧片段
 		dataFragments := createDataFragments(t, 3, 10, 1024) // 10个1KB的片段
 		var totalData []byte
 
-		var responses []*types.HTTPResponse
+		var requests []*types.HTTPRequest
 		for i, fragment := range dataFragments {
 			isLast := i == len(dataFragments)-1
 			if isLast {
@@ -127,35 +129,31 @@ func TestFragmentedFrameReassembly(t *testing.T) {
 				fragment[4] |= 0x01
 			}
 
-			resps, err := parser.ParseResponse(connID, fragment)
+			reqs, err := parser.ParseRequest(connID, fragment)
 			if err != nil {
 				t.Fatalf("解析DATA片段 %d 失败: %v", i, err)
-			}
-			var resp *types.HTTPResponse
-			if len(resps) > 0 {
-				resp = resps[0]
 			}
 
 			// 累积数据用于验证
 			totalData = append(totalData, fragment[9:]...)
 
-			// 每个DATA帧都应该返回响应片段
-			if resp == nil {
-				t.Errorf("DATA片段 %d 应返回响应片段", i)
-			} else {
-				responses = append(responses, resp)
-				// 只有最后一个片段应该标记为完整
-				if isLast && !resp.Complete {
-					t.Error("最后的DATA片段应标记为完整")
+			// 只有最后一个DATA帧（带END_STREAM标志）应该返回完整请求
+			if isLast {
+				if len(reqs) == 0 {
+					t.Error("最后的DATA片段应返回完整请求")
+				} else {
+					requests = append(requests, reqs[0])
 				}
-				if !isLast && resp.Complete {
-					t.Errorf("DATA片段 %d 不应标记为完整", i)
+			} else {
+				// 中间的DATA帧不应该返回请求
+				if len(reqs) != 0 {
+					t.Errorf("DATA片段 %d 应该返回空数组，实际返回%d个请求", i, len(reqs))
 				}
 			}
 		}
 
-		if len(responses) != len(dataFragments) {
-			t.Errorf("期望 %d 个响应片段，实际 %d 个", len(dataFragments), len(responses))
+		if len(requests) != 1 {
+			t.Errorf("期望 1 个完整请求，实际 %d 个", len(requests))
 		}
 	})
 }

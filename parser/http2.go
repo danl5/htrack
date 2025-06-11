@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -96,9 +97,15 @@ type HTTP2Stream struct {
 	// 头部分片重组状态
 	HeadersStarted       bool
 	AwaitingContinuation bool
-	// 数据累积
-	DataFragments   [][]byte
-	TotalDataLength int64
+	// 数据累积 - 区分请求和响应
+	RequestDataFragments  [][]byte
+	ResponseDataFragments [][]byte
+	RequestDataLength     int64
+	ResponseDataLength    int64
+	// 流状态标记
+	RequestComplete  bool
+	ResponseComplete bool
+	IsResponse       bool // 标记当前是否在处理响应
 }
 
 // NewHTTP2Parser 创建HTTP/2解析器
@@ -128,6 +135,10 @@ func (p *HTTP2Parser) getOrCreateStream(connID string, streamID uint32) *HTTP2St
 			ID:        streamID,
 			CreatedAt: time.Now(),
 			Headers:   make(http.Header),
+			// 确保新流的状态正确初始化
+			IsResponse:       false,
+			RequestComplete:  false,
+			ResponseComplete: false,
 		}
 		conn.SetStream(streamID, stream)
 	}
@@ -143,21 +154,8 @@ func (p *HTTP2Parser) ParseRequest(connectionID string, data []byte) ([]*types.H
 	// 检查连接前导
 	if len(data) >= 24 && bytes.HasPrefix(data, []byte("PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")) {
 		offset = 24
-		// 创建PRI请求对象
-		priRequest := &types.HTTPRequest{
-			HTTPMessage: types.HTTPMessage{
-				Proto:      "HTTP/2.0",
-				ProtoMajor: 2,
-				ProtoMinor: 0,
-				Headers:    make(http.Header),
-				Timestamp:  time.Now(),
-				Complete:   true,
-			},
-			Method: "PRI",
-			URL:    &url.URL{Path: "*"},
-		}
-		requests = append(requests, priRequest)
-		// 如果只有连接前导，返回PRI请求
+		// 跳过HTTP/2前言，不创建PRI请求对象
+		// 如果只有连接前导，返回空数组
 		if len(data) == 24 {
 			return requests, nil
 		}
@@ -172,7 +170,18 @@ func (p *HTTP2Parser) ParseRequest(connectionID string, data []byte) ([]*types.H
 
 		header, err := http2.ParseFrameHeader(data[offset:])
 		if err != nil {
-			return requests, err
+			return requests, fmt.Errorf("failed to parse frame header at offset %d: %w", offset, err)
+		}
+
+		// 检查帧长度是否合理（HTTP/2规范限制）
+		const maxFrameSize = 1<<24 - 1 // 16MB - 1
+		if header.Length > maxFrameSize {
+			return requests, fmt.Errorf("frame too large: %d bytes (max %d)", header.Length, maxFrameSize)
+		}
+
+		// 安全的整数转换，防止溢出
+		if header.Length > math.MaxInt32-uint32(offset)-9 {
+			return requests, fmt.Errorf("frame size would cause integer overflow")
 		}
 
 		frameEnd := offset + 9 + int(header.Length)
@@ -183,7 +192,7 @@ func (p *HTTP2Parser) ParseRequest(connectionID string, data []byte) ([]*types.H
 		frameData := data[offset+9 : frameEnd]
 		req, err := p.parseFrame(connectionID, header, frameData)
 		if err != nil {
-			return requests, err
+			return requests, fmt.Errorf("failed to parse frame (stream %d, type %d): %w", header.StreamID, header.Type, err)
 		}
 
 		if req != nil {
@@ -210,7 +219,18 @@ func (p *HTTP2Parser) ParseResponse(connectionID string, data []byte) ([]*types.
 
 		header, err := http2.ParseFrameHeader(data[offset:])
 		if err != nil {
-			return responses, err
+			return responses, fmt.Errorf("failed to parse frame header at offset %d: %w", offset, err)
+		}
+
+		// 检查帧长度是否合理（HTTP/2规范限制）
+		const maxFrameSize = 1<<24 - 1 // 16MB - 1
+		if header.Length > maxFrameSize {
+			return responses, fmt.Errorf("frame too large: %d bytes (max %d)", header.Length, maxFrameSize)
+		}
+
+		// 安全的整数转换，防止溢出
+		if header.Length > math.MaxInt32-uint32(offset)-9 {
+			return responses, fmt.Errorf("frame size would cause integer overflow")
 		}
 
 		frameEnd := offset + 9 + int(header.Length)
@@ -221,7 +241,7 @@ func (p *HTTP2Parser) ParseResponse(connectionID string, data []byte) ([]*types.
 		frameData := data[offset+9 : frameEnd]
 		resp, err := p.parseResponseFrame(connectionID, header, frameData)
 		if err != nil {
-			return responses, err
+			return responses, fmt.Errorf("failed to parse response frame (stream %d, type %d): %w", header.StreamID, header.Type, err)
 		}
 
 		if resp != nil {
@@ -362,18 +382,40 @@ func (p *HTTP2Parser) parseDataFrame(connectionID string, header http2.FrameHead
 	// 获取或创建流
 	stream := p.getOrCreateStream(connectionID, header.StreamID)
 
-	// 累积数据片段
+	// 根据流状态累积数据片段
 	if len(data) > 0 {
-		stream.DataFragments = append(stream.DataFragments, data)
-		stream.TotalDataLength += int64(len(data))
+		if stream.IsResponse {
+			// 响应数据
+			stream.ResponseDataFragments = append(stream.ResponseDataFragments, data)
+			stream.ResponseDataLength += int64(len(data))
+		} else {
+			// 请求数据
+			stream.RequestDataFragments = append(stream.RequestDataFragments, data)
+			stream.RequestDataLength += int64(len(data))
+		}
 	}
 
 	// 检查是否结束流
-	stream.EndStream = header.Flags&http2.FlagDataEndStream != 0
+	endStream := header.Flags&http2.FlagDataEndStream != 0
 
-	// 如果流结束或者这是唯一的数据帧，构建完整的请求
-	if stream.EndStream {
-		return p.buildDataRequest(stream)
+	// 根据当前状态更新完成标记
+	if stream.IsResponse {
+		stream.ResponseComplete = endStream
+	} else {
+		stream.RequestComplete = endStream
+	}
+
+	// 如果请求阶段结束，构建完整的请求
+	if stream.RequestComplete && !stream.IsResponse {
+		request, err := p.buildDataRequest(stream)
+		// 请求完成后，标记为响应阶段
+		if endStream {
+			stream.IsResponse = true
+		}
+		// 只有当buildDataRequest返回非nil请求时才返回
+		if request != nil {
+			return request, err
+		}
 	}
 
 	return nil, nil
@@ -463,6 +505,13 @@ func (p *HTTP2Parser) decodeCompleteHeaders(connectionID string, stream *HTTP2St
 		headers.Add(hf.Name, hf.Value)
 	}
 
+	// 检查是否为响应头部（包含:status伪头部）
+	if headers.Get(":status") != "" {
+		// 这是响应头部，标记流为响应阶段
+		stream.IsResponse = true
+		return nil, nil // 响应头部不返回请求对象
+	}
+
 	// 构建HTTP请求
 	request := &types.HTTPRequest{
 		HTTPMessage: types.HTTPMessage{
@@ -520,7 +569,15 @@ func (p *HTTP2Parser) decodeCompleteHeaders(connectionID string, stream *HTTP2St
 	stream.Request = request
 	stream.Headers = headers
 
-	return request, nil
+	// 对于HTTP/2协议，只有在请求真正完成时才返回请求对象
+	// 如果HEADERS帧带有END_STREAM标志，说明没有DATA帧，请求完成
+	// 否则需要等待DATA帧来完成请求
+	if request.Complete {
+		return request, nil
+	}
+
+	// 请求未完成，返回nil等待DATA帧
+	return nil, nil
 }
 
 // parseResponseFrame 解析响应帧
@@ -629,7 +686,11 @@ func (p *HTTP2Parser) parseResponseHeadersFrame(connectionID string, header http
 	stream := p.getOrCreateStream(connectionID, header.StreamID)
 	stream.Response = response
 
-	return response, nil
+	// 只有在响应完成时才返回响应对象
+	if response.Complete {
+		return response, nil
+	}
+	return nil, nil
 }
 
 // parseResponseDataFrame 解析响应DATA帧
@@ -660,12 +721,13 @@ func (p *HTTP2Parser) parseResponseDataFrame(connectionID string, header http2.F
 
 	// 累积响应数据片段
 	if len(data) > 0 {
-		stream.DataFragments = append(stream.DataFragments, data)
-		stream.TotalDataLength += int64(len(data))
+		stream.ResponseDataFragments = append(stream.ResponseDataFragments, data)
+		stream.ResponseDataLength += int64(len(data))
 	}
 
 	// 检查是否结束流
-	stream.EndStream = header.Flags&http2.FlagDataEndStream != 0
+	endStream := header.Flags&http2.FlagDataEndStream != 0
+	stream.ResponseComplete = endStream
 
 	// 如果流中已有响应对象（来自HEADERS帧），使用它；否则创建新的响应对象
 	var response *types.HTTPResponse
@@ -674,7 +736,7 @@ func (p *HTTP2Parser) parseResponseDataFrame(connectionID string, header http2.F
 		response = stream.Response
 		// 更新数据相关字段
 		response.Body = data
-		response.Complete = stream.EndStream
+		response.Complete = endStream
 		response.RawData = data
 	} else {
 		// 创建新的响应对象（仅包含数据）
@@ -683,24 +745,24 @@ func (p *HTTP2Parser) parseResponseDataFrame(connectionID string, header http2.F
 				Body:      data,
 				Timestamp: time.Now(),
 				StreamID:  &header.StreamID,
-				Complete:  stream.EndStream,
+				Complete:  endStream,
 				RawData:   data,
 			},
 		}
 		stream.Response = response
 	}
 
-	// 如果流结束，合并所有数据片段
-	if stream.EndStream && len(stream.DataFragments) > 1 {
+	// 如果流结束，合并所有响应数据片段
+	if endStream && len(stream.ResponseDataFragments) > 1 {
 		// 计算总长度
 		totalLen := 0
-		for _, fragment := range stream.DataFragments {
+		for _, fragment := range stream.ResponseDataFragments {
 			totalLen += len(fragment)
 		}
 
 		// 合并所有片段
 		combinedData := make([]byte, 0, totalLen)
-		for _, fragment := range stream.DataFragments {
+		for _, fragment := range stream.ResponseDataFragments {
 			combinedData = append(combinedData, fragment...)
 		}
 
@@ -709,7 +771,11 @@ func (p *HTTP2Parser) parseResponseDataFrame(connectionID string, header http2.F
 		response.RawData = combinedData
 	}
 
-	return response, nil
+	// 只有在响应完成时才返回响应对象
+	if response.Complete {
+		return response, nil
+	}
+	return nil, nil
 }
 
 func (p *HTTP2Parser) DetectVersion(data []byte) types.HTTPVersion {
@@ -794,27 +860,31 @@ func validateHTTP2Frame(data []byte) types.HTTPVersion {
 
 // buildDataRequest 构建包含累积数据的请求
 func (p *HTTP2Parser) buildDataRequest(stream *HTTP2Stream) (*types.HTTPRequest, error) {
-	// 合并所有数据片段
+	// 合并请求阶段的数据片段
 	var completeData []byte
-	for _, fragment := range stream.DataFragments {
+	for _, fragment := range stream.RequestDataFragments {
 		completeData = append(completeData, fragment...)
 	}
 
 	// 如果流已有请求（来自HEADERS），更新其数据
 	if stream.Request != nil {
 		stream.Request.Body = completeData
-		stream.Request.Complete = stream.EndStream
+		stream.Request.Complete = stream.RequestComplete
 		stream.Request.RawData = completeData
-		return stream.Request, nil
+		// 只有在请求完成时才返回，避免重复返回未完成的请求
+		if stream.RequestComplete {
+			return stream.Request, nil
+		}
+		return nil, nil
 	}
 
-	// 否则创建新的数据请求
+	// 否则创建新的数据请求（仅数据帧的情况）
 	request := &types.HTTPRequest{
 		HTTPMessage: types.HTTPMessage{
 			Body:      completeData,
 			Timestamp: time.Now(),
 			StreamID:  &stream.ID,
-			Complete:  stream.EndStream,
+			Complete:  stream.RequestComplete,
 			RawData:   completeData,
 		},
 	}

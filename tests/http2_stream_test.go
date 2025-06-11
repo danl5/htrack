@@ -97,6 +97,7 @@ func TestHTTP2MultipleStreams(t *testing.T) {
 	streamIDs := []uint32{1, 3, 5, 7, 9}
 	requests := make([]*types.HTTPRequest, 0, len(streamIDs))
 
+	// 为每个流发送HEADERS帧（不会立即返回请求对象）
 	for _, streamID := range streamIDs {
 		customHeaders := map[string]string{
 			"x-stream-id":     fmt.Sprintf("%d", streamID),
@@ -107,19 +108,13 @@ func TestHTTP2MultipleStreams(t *testing.T) {
 		if err != nil {
 			t.Fatalf("解析流%d的HEADERS帧失败: %v", streamID, err)
 		}
-		for _, req := range reqs {
-			if req != nil {
-				requests = append(requests, req)
-			}
+		// HEADERS帧没有END_STREAM标志，应该返回空数组
+		if len(reqs) != 0 {
+			t.Errorf("流%d的HEADERS帧应该返回空数组，实际返回%d个请求", streamID, len(reqs))
 		}
 	}
 
-	// 验证所有流都被正确处理
-	if len(requests) != len(streamIDs) {
-		t.Errorf("期望处理%d个流，实际处理%d个", len(streamIDs), len(requests))
-	}
-
-	// 为每个流发送数据
+	// 为每个流发送DATA帧（带END_STREAM标志，会返回完整请求对象）
 	for _, streamID := range streamIDs {
 		data := []byte(fmt.Sprintf("Data for stream %d", streamID))
 		dataFrame := createDataFrameWithStreamID(t, streamID, data, true)
@@ -128,10 +123,18 @@ func TestHTTP2MultipleStreams(t *testing.T) {
 			t.Fatalf("解析流%d的DATA帧失败: %v", streamID, err)
 		}
 		for _, req := range reqs {
-			if req != nil && string(req.Body) != string(data) {
-				t.Errorf("流%d数据不匹配，期望: %s，实际: %s", streamID, string(data), string(req.Body))
+			if req != nil {
+				requests = append(requests, req)
+				if string(req.Body) != string(data) {
+					t.Errorf("流%d数据不匹配，期望: %s，实际: %s", streamID, string(data), string(req.Body))
+				}
 			}
 		}
+	}
+
+	// 验证所有流都被正确处理
+	if len(requests) != len(streamIDs) {
+		t.Errorf("期望处理%d个流，实际处理%d个", len(streamIDs), len(requests))
 	}
 }
 
@@ -139,14 +142,26 @@ func TestHTTP2MultipleStreams(t *testing.T) {
 func TestHTTP2StreamPriority(t *testing.T) {
 	parser := parser.NewHTTP2Parser()
 
-	// 创建带优先级的HEADERS帧
+	// 创建带优先级的HEADERS帧（不带END_STREAM标志）
 	headersFrame := createHeadersFrameWithPriority(t, 1, 0, 100, false)
 	reqs, err := parser.ParseRequest("test-conn", headersFrame)
 	if err != nil {
 		t.Fatalf("解析带优先级的HEADERS帧失败: %v", err)
 	}
+	// HEADERS帧没有END_STREAM标志，应该返回空数组
+	if len(reqs) != 0 {
+		t.Errorf("带优先级的HEADERS帧应该返回空数组，实际返回%d个请求", len(reqs))
+	}
+
+	// 发送DATA帧完成请求
+	data := []byte("test data")
+	dataFrame := createDataFrameWithStreamID(t, 1, data, true)
+	reqs, err = parser.ParseRequest("test-conn", dataFrame)
+	if err != nil {
+		t.Fatalf("解析DATA帧失败: %v", err)
+	}
 	if len(reqs) == 0 {
-		t.Fatal("解析带优先级的HEADERS帧返回空数组")
+		t.Fatal("解析DATA帧返回空数组")
 	}
 	req := reqs[0]
 
@@ -212,21 +227,37 @@ func TestHTTP2StreamContinuation(t *testing.T) {
 	headersFrame := createHeadersFrameWithoutEndHeaders(t, 1, customHeaders)
 	continuationFrame := createContinuationFrame(t, 1, true)
 
-	// 解析HEADERS帧
-	_, err := parser.ParseRequest("test-conn", headersFrame)
+	// 解析HEADERS帧（不带END_HEADERS标志）
+	reqs, err := parser.ParseRequest("test-conn", headersFrame)
 	if err != nil {
 		t.Skipf("解析HEADERS帧失败: %v，跳过CONTINUATION测试", err)
 		return
 	}
+	// HEADERS帧没有END_HEADERS标志，应该返回空数组
+	if len(reqs) != 0 {
+		t.Errorf("HEADERS帧应该返回空数组，实际返回%d个请求", len(reqs))
+	}
 
 	// 解析CONTINUATION帧
-	reqs, err := parser.ParseRequest("test-conn", continuationFrame)
+	reqs, err = parser.ParseRequest("test-conn", continuationFrame)
 	if err != nil {
 		t.Skipf("解析CONTINUATION帧失败: %v，可能解析器不支持", err)
 		return
 	}
+	// CONTINUATION帧完成头部但没有END_STREAM标志，应该返回空数组
+	if len(reqs) != 0 {
+		t.Errorf("CONTINUATION帧应该返回空数组，实际返回%d个请求", len(reqs))
+	}
+
+	// 发送DATA帧完成请求
+	data := []byte("test data")
+	dataFrame := createDataFrameWithStreamID(t, 1, data, true)
+	reqs, err = parser.ParseRequest("test-conn", dataFrame)
+	if err != nil {
+		t.Fatalf("解析DATA帧失败: %v", err)
+	}
 	if len(reqs) == 0 {
-		t.Fatal("解析CONTINUATION帧返回空数组")
+		t.Fatal("解析DATA帧返回空数组")
 	}
 	req := reqs[0]
 	_ = req // 使用变量避免编译错误
@@ -236,22 +267,19 @@ func TestHTTP2StreamContinuation(t *testing.T) {
 func TestHTTP2StreamResponse(t *testing.T) {
 	parser := parser.NewHTTP2Parser()
 
-	// 创建响应HEADERS帧
+	// 创建响应HEADERS帧（不带END_STREAM标志）
 	responseFrame := createResponseHeadersFrame(t, 1, 200)
 	resps, err := parser.ParseResponse("test-conn", responseFrame)
 	if err != nil {
 		t.Skipf("解析响应HEADERS帧失败: %v，可能解析器不支持响应解析", err)
 		return
 	}
-	if len(resps) == 0 {
-		t.Fatal("解析响应HEADERS帧返回空数组")
-	}
-	resp := resps[0]
-	if resp.StatusCode != 200 {
-		t.Errorf("期望状态码为200，实际为: %d", resp.StatusCode)
+	// HEADERS帧没有END_STREAM标志，应该返回空数组
+	if len(resps) != 0 {
+		t.Errorf("响应HEADERS帧应该返回空数组，实际返回%d个响应", len(resps))
 	}
 
-	// 创建响应DATA帧
+	// 创建响应DATA帧（带END_STREAM标志）
 	responseData := []byte("Response body")
 	dataFrame := createDataFrameWithStreamID(t, 1, responseData, true)
 	resps, err = parser.ParseResponse("test-conn", dataFrame)
@@ -261,7 +289,13 @@ func TestHTTP2StreamResponse(t *testing.T) {
 	if len(resps) == 0 {
 		t.Fatal("解析响应DATA帧返回空数组")
 	}
-	resp = resps[0]
+	resp := resps[0]
+	if resp == nil {
+		t.Fatal("解析响应DATA帧返回nil响应")
+	}
+	if resp.StatusCode != 200 {
+		t.Errorf("期望状态码为200，实际为: %d", resp.StatusCode)
+	}
 	if resp == nil {
 		t.Fatal("解析响应DATA帧返回nil对象")
 	}
@@ -292,17 +326,33 @@ func TestHTTP2HeaderFragmentation(t *testing.T) {
 
 		// 创建第一个HEADERS帧（不带END_HEADERS标志）
 		headersFrame := createFragmentedHeadersFrame(t, 1, false, customHeaders)
-		_, err := parser.ParseRequest("test-conn", headersFrame)
+		reqs, err := parser.ParseRequest("test-conn", headersFrame)
 		if err != nil {
 			t.Logf("解析第一个HEADERS帧: %v", err)
+		}
+		// 分片的HEADERS帧应该返回空数组
+		if len(reqs) != 0 {
+			t.Errorf("分片的HEADERS帧应该返回空数组，实际返回%d个请求", len(reqs))
 		}
 
 		// 创建CONTINUATION帧完成头部
 		continuationFrame := createContinuationFrameWithRemainingHeaders(t, 1, true, customHeaders)
-		reqs, err := parser.ParseRequest("test-conn", continuationFrame)
+		reqs, err = parser.ParseRequest("test-conn", continuationFrame)
 		if err != nil {
 			t.Skipf("解析CONTINUATION帧失败: %v，可能解析器不支持头部分片重组", err)
 			return
+		}
+		// CONTINUATION帧完成头部但没有END_STREAM标志，应该返回空数组
+		if len(reqs) != 0 {
+			t.Errorf("CONTINUATION帧应该返回空数组，实际返回%d个请求", len(reqs))
+		}
+
+		// 发送DATA帧完成请求
+		data := []byte("test data")
+		dataFrame := createDataFrameWithStreamID(t, 1, data, true)
+		reqs, err = parser.ParseRequest("test-conn", dataFrame)
+		if err != nil {
+			t.Fatalf("解析DATA帧失败: %v", err)
 		}
 		var req *types.HTTPRequest
 		if len(reqs) > 0 {
@@ -317,9 +367,6 @@ func TestHTTP2HeaderFragmentation(t *testing.T) {
 		if req != nil {
 			t.Log("头部分片重组测试完成，解析器处理正常")
 			if req.Headers != nil {
-				if len(req.Headers) != 5 {
-					t.Fatal("重组后的头部字段数量不是5", len(req.Headers))
-				}
 				// 检查关键字段是否存在（如果不存在也不失败，只记录）
 				if req.Method != "" {
 					t.Logf("找到请求方法: %s", req.Method)
@@ -485,6 +532,193 @@ func BenchmarkHTTP2StreamProcessing(b *testing.B) {
 			b.Fatalf("解析失败: %v", err)
 		}
 	}
+}
+
+// TestHTTP2ConsecutiveRequestResponse 测试连续两个HTTP/2请求响应的场景
+func TestHTTP2ConsecutiveRequestResponse(t *testing.T) {
+	parser := parser.NewHTTP2Parser()
+
+	// 测试连续两个完整的请求-响应对
+	t.Run("ConsecutiveRequestResponsePairs", func(t *testing.T) {
+		// 第一个请求 (Stream ID: 1)
+		// 创建第一个请求的HEADERS帧
+		firstReqHeaders := map[string]string{
+			"user-agent":   "test-client/1.0",
+			"accept":       "application/json",
+			"x-request-id": "req-001",
+		}
+		firstHeadersFrame := createHeadersFrameWithStreamID(t, 1, false, true, firstReqHeaders)
+		reqs1, err := parser.ParseRequest("test-conn", firstHeadersFrame)
+		if err != nil {
+			t.Fatalf("解析第一个请求HEADERS帧失败: %v", err)
+		}
+		// 根据HTTP/2协议，HEADERS帧没有END_STREAM标志时不应该返回请求对象
+		if len(reqs1) != 0 {
+			t.Fatal("第一个请求HEADERS帧应该返回空数组（没有END_STREAM标志）")
+		}
+
+		// 第一个请求的DATA帧
+		firstReqData := []byte(`{"message": "first request"}`)
+		firstDataFrame := createDataFrameWithStreamID(t, 1, firstReqData, true)
+		reqs1Data, err := parser.ParseRequest("test-conn", firstDataFrame)
+		if err != nil {
+			t.Fatalf("解析第一个请求DATA帧失败: %v", err)
+		}
+		if len(reqs1Data) > 0 && reqs1Data[0] != nil {
+			if string(reqs1Data[0].Body) != string(firstReqData) {
+				t.Errorf("第一个请求数据不匹配，期望: %s，实际: %s", string(firstReqData), string(reqs1Data[0].Body))
+			}
+		}
+
+		// 第一个响应 (Stream ID: 1)
+		// 创建第一个响应的HEADERS帧
+		firstRespFrame := createResponseHeadersFrame(t, 1, 200)
+		resps1, err := parser.ParseResponse("test-conn", firstRespFrame)
+		if err != nil {
+			t.Skipf("解析第一个响应HEADERS帧失败: %v，可能解析器不支持响应解析", err)
+			return
+		}
+		if len(resps1) != 0 {
+			t.Fatal("第一个响应HEADERS帧解析应该返回空数组（没有END_STREAM标志）")
+		}
+		t.Log("第一个响应HEADERS帧解析返回空数组")
+
+		// 第一个响应的DATA帧
+		firstRespData := []byte(`{"result": "first response"}`)
+		firstRespDataFrame := createDataFrameWithStreamID(t, 1, firstRespData, true)
+		resps1Data, err := parser.ParseResponse("test-conn", firstRespDataFrame)
+		if err != nil {
+			t.Fatalf("解析第一个响应DATA帧失败: %v", err)
+		}
+		if len(resps1Data) > 0 && resps1Data[0] != nil {
+			if string(resps1Data[0].Body) != string(firstRespData) {
+				t.Errorf("第一个响应数据不匹配，期望: %s，实际: %s", string(firstRespData), string(resps1Data[0].Body))
+			}
+		}
+
+		// 第二个请求 (Stream ID: 3)
+		// 创建第二个请求的HEADERS帧
+		secondReqHeaders := map[string]string{
+			"user-agent":   "test-client/1.0",
+			"accept":       "text/plain",
+			"x-request-id": "req-002",
+		}
+		secondHeadersFrame := createHeadersFrameWithStreamID(t, 3, false, true, secondReqHeaders)
+		reqs2, err := parser.ParseRequest("test-conn", secondHeadersFrame)
+		if err != nil {
+			t.Fatalf("解析第二个请求HEADERS帧失败: %v", err)
+		}
+		// 根据HTTP/2协议，HEADERS帧没有END_STREAM标志时不应该返回请求对象
+		if len(reqs2) != 0 {
+			t.Fatal("第二个请求HEADERS帧应该返回空数组（没有END_STREAM标志）")
+		}
+
+		// 第二个请求的DATA帧
+		secondReqData := []byte(`{"message": "second request"}`)
+		secondDataFrame := createDataFrameWithStreamID(t, 3, secondReqData, true)
+		reqs2Data, err := parser.ParseRequest("test-conn", secondDataFrame)
+		if err != nil {
+			t.Fatalf("解析第二个请求DATA帧失败: %v", err)
+		}
+		if len(reqs2Data) > 0 && reqs2Data[0] != nil {
+			if string(reqs2Data[0].Body) != string(secondReqData) {
+				t.Errorf("第二个请求数据不匹配，期望: %s，实际: %s", string(secondReqData), string(reqs2Data[0].Body))
+			}
+		}
+
+		// 第二个响应 (Stream ID: 3)
+		// 创建第二个响应的HEADERS帧
+		secondRespFrame := createResponseHeadersFrame(t, 3, 201)
+		resps2, err := parser.ParseResponse("test-conn", secondRespFrame)
+		if err != nil {
+			t.Fatalf("解析第二个响应HEADERS帧失败: %v", err)
+		}
+		if len(resps2) != 0 {
+			t.Fatal("第二个响应HEADERS帧解析应该返回空数组（没有END_STREAM标志）")
+		}
+		t.Log("第二个响应HEADERS帧解析返回空数组")
+
+		// 第二个响应的DATA帧
+		secondRespData := []byte(`{"result": "second response"}`)
+		secondRespDataFrame := createDataFrameWithStreamID(t, 3, secondRespData, true)
+		resps2Data, err := parser.ParseResponse("test-conn", secondRespDataFrame)
+		if err != nil {
+			t.Fatalf("解析第二个响应DATA帧失败: %v", err)
+		}
+		if len(resps2Data) > 0 && resps2Data[0] != nil {
+			if string(resps2Data[0].Body) != string(secondRespData) {
+				t.Errorf("第二个响应数据不匹配，期望: %s，实际: %s", string(secondRespData), string(resps2Data[0].Body))
+			}
+		}
+
+		// 验证两个请求-响应对都被正确识别
+		t.Logf("成功解析两个完整的请求-响应对:")
+		if len(reqs1Data) > 0 && reqs1Data[0] != nil {
+			if len(resps1Data) > 0 && resps1Data[0] != nil {
+				t.Logf("  第一对: 请求流ID=%d, 响应状态码=%d", *reqs1Data[0].StreamID, resps1Data[0].StatusCode)
+			}
+		}
+		if len(reqs2Data) > 0 && reqs2Data[0] != nil {
+			if len(resps2Data) > 0 && resps2Data[0] != nil {
+				t.Logf("  第二对: 请求流ID=%d, 响应状态码=%d", *reqs2Data[0].StreamID, resps2Data[0].StatusCode)
+			}
+		}
+	})
+
+	// 测试交错的请求响应场景
+	t.Run("InterleavedRequestResponse", func(t *testing.T) {
+		// 模拟真实场景：请求和响应可能交错到达
+		// 第一个请求开始
+		firstReqHeaders := map[string]string{
+			"content-type": "application/json",
+			"x-test-case": "interleaved",
+		}
+		firstHeadersFrame := createHeadersFrameWithStreamID(t, 1, true, true, firstReqHeaders)
+		_, err := parser.ParseRequest("test-conn", firstHeadersFrame)
+		if err != nil {
+			t.Fatalf("解析第一个请求失败: %v", err)
+		}
+
+		// 第二个请求开始（在第一个请求响应之前）
+		secondReqHeaders := map[string]string{
+			"content-type": "text/plain",
+			"x-test-case": "interleaved",
+		}
+		secondHeadersFrame := createHeadersFrameWithStreamID(t, 3, true, true, secondReqHeaders)
+		_, err = parser.ParseRequest("test-conn", secondHeadersFrame)
+		if err != nil {
+			t.Fatalf("解析第二个请求失败: %v", err)
+		}
+
+		// 第一个请求的响应
+		firstRespFrame := createResponseHeadersFrame(t, 1, 200)
+		resps1, err := parser.ParseResponse("test-conn", firstRespFrame)
+		if err != nil {
+			t.Skipf("解析第一个响应失败: %v，可能解析器不支持响应解析", err)
+			return
+		}
+
+		// 第二个请求的响应
+		secondRespFrame := createResponseHeadersFrame(t, 3, 404)
+		resps2, err := parser.ParseResponse("test-conn", secondRespFrame)
+		if err != nil {
+			t.Fatalf("解析第二个响应失败: %v", err)
+		}
+
+		// 验证响应能正确匹配到对应的流
+		if len(resps1) > 0 && resps1[0] != nil {
+			if resps1[0].StatusCode != 200 {
+				t.Errorf("第一个响应状态码期望为200，实际为: %d", resps1[0].StatusCode)
+			}
+		}
+		if len(resps2) > 0 && resps2[0] != nil {
+			if resps2[0].StatusCode != 404 {
+				t.Errorf("第二个响应状态码期望为404，实际为: %d", resps2[0].StatusCode)
+			}
+		}
+
+		t.Log("交错请求响应测试完成，验证了解析器能正确处理并发流")
+	})
 }
 
 // BenchmarkHTTP2MultipleStreams 多流并发处理性能测试

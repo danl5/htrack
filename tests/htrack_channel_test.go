@@ -329,3 +329,194 @@ func TestHTrackChannelBufferOverflow(t *testing.T) {
 		}
 	}
 }
+
+// TestHTrackChannelOrderAndCount 测试请求和响应的返回次数和顺序
+func TestHTrackChannelOrderAndCount(t *testing.T) {
+	config := &htrack.Config{
+		MaxSessions:        100,
+		MaxTransactions:    100,
+		TransactionTimeout: 30 * time.Second,
+		BufferSize:         64 * 1024,
+		EnableHTTP1:        true,
+		EnableHTTP2:        false,
+		AutoCleanup:        false,
+		ChannelBufferSize:  50, // 足够大的缓冲区
+		EnableChannels:     true,
+	}
+
+	ht := htrack.New(config)
+	defer ht.Close()
+
+	const numPairs = 3
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+
+	// 用于记录接收到的请求和响应的顺序
+	type ReceivedItem struct {
+		Type      string // "request" 或 "response"
+		Path      string // 对于请求是URL路径，对于响应是状态码字符串
+		Timestamp time.Time
+		Index     int // 接收顺序索引
+	}
+
+	var receivedItems []ReceivedItem
+	var requestCount, responseCount int
+
+	// 监听请求channel
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case request := <-ht.GetRequestChan():
+				if request == nil {
+					t.Log("请求为nil，跳过")
+					continue
+				}
+
+				mu.Lock()
+				requestCount++
+				receivedItems = append(receivedItems, ReceivedItem{
+					Type:      "request",
+					Path:      request.URL.Path,
+					Timestamp: time.Now(),
+					Index:     requestCount,
+				})
+				mu.Unlock()
+				t.Logf("收到请求 #%d: %s %s", requestCount, request.Method, request.URL.Path)
+			case <-time.After(8 * time.Second):
+				t.Log("请求监听超时，停止监听")
+				return
+			}
+		}
+	}()
+
+	// 监听响应channel
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case response := <-ht.GetResponseChan():
+				if response == nil {
+					t.Log("响应为nil，跳过")
+					continue
+				}
+
+				mu.Lock()
+				responseCount++
+				receivedItems = append(receivedItems, ReceivedItem{
+					Type:      "response",
+					Path:      fmt.Sprintf("%d", response.StatusCode),
+					Timestamp: time.Now(),
+					Index:     responseCount,
+				})
+				mu.Unlock()
+				t.Logf("收到响应 #%d: %d %s", responseCount, response.StatusCode, response.Status)
+			case <-time.After(8 * time.Second):
+				t.Log("响应监听超时，停止监听")
+				return
+			}
+		}
+	}()
+
+	// 按特定顺序发送请求和响应
+	// 场景：先发送所有请求，再发送所有响应
+	t.Log("=== 开始发送请求 ===")
+	for i := 0; i < numPairs; i++ {
+		sessionID := fmt.Sprintf("order-test-session-%d", i+1)
+		request := fmt.Sprintf("GET /api/order/test/%d HTTP/1.1\r\nHost: test.example.com\r\nContent-Length: 0\r\n\r\n", i+1)
+
+		err := ht.ProcessPacket(sessionID, []byte(request), types.DirectionRequest)
+		if err != nil {
+			t.Fatalf("处理请求 %d 失败: %v", i+1, err)
+		}
+		t.Logf("发送请求 %d: GET /api/order/test/%d (Session: %s)", i+1, i+1, sessionID)
+		time.Sleep(200 * time.Millisecond) // 确保顺序
+	}
+
+	t.Log("=== 开始发送响应 ===")
+	for i := 0; i < numPairs; i++ {
+		sessionID := fmt.Sprintf("order-test-session-%d", i+1)
+		statusCode := 200 + i // 200, 201, 202
+		response := fmt.Sprintf("HTTP/1.1 %d OK\r\nContent-Type: application/json\r\nContent-Length: 20\r\n\r\n{\"order_id\":%d,\"ok\":true}", statusCode, i+1)
+
+		err := ht.ProcessPacket(sessionID, []byte(response), types.DirectionResponse)
+		if err != nil {
+			t.Fatalf("处理响应 %d 失败: %v", i+1, err)
+		}
+		t.Logf("发送响应 %d: %d OK (Session: %s)", i+1, statusCode, sessionID)
+		time.Sleep(200 * time.Millisecond) // 确保顺序
+	}
+
+	// 等待一段时间确保所有数据都被处理
+	time.Sleep(2 * time.Second)
+
+	wg.Wait()
+
+	// 验证结果
+	mu.Lock()
+	defer mu.Unlock()
+
+	t.Logf("=== 验证结果 ===")
+	t.Logf("期望请求数量: %d, 实际收到: %d", numPairs, requestCount)
+	t.Logf("期望响应数量: %d, 实际收到: %d", numPairs, responseCount)
+
+	// 验证数量
+	if requestCount != numPairs {
+		t.Errorf("请求数量不匹配: 期望 %d, 实际 %d", numPairs, requestCount)
+	}
+	if responseCount != numPairs {
+		t.Errorf("响应数量不匹配: 期望 %d, 实际 %d", numPairs, responseCount)
+	}
+
+	// 验证顺序：所有请求应该在所有响应之前
+	t.Log("=== 验证接收顺序 ===")
+	var requestItems, responseItems []ReceivedItem
+	for _, item := range receivedItems {
+		if item.Type == "request" {
+			requestItems = append(requestItems, item)
+		} else {
+			responseItems = append(responseItems, item)
+		}
+	}
+
+	// 验证请求的顺序
+	for i, item := range requestItems {
+		expectedPath := fmt.Sprintf("/api/order/test/%d", i+1)
+		if item.Path != expectedPath {
+			t.Errorf("请求 %d 路径不匹配: 期望 %s, 实际 %s", i+1, expectedPath, item.Path)
+		}
+		if item.Index != i+1 {
+			t.Errorf("请求 %d 接收顺序不匹配: 期望 %d, 实际 %d", i+1, i+1, item.Index)
+		}
+		t.Logf("请求 %d: %s - 时间: %s", i+1, item.Path, item.Timestamp.Format("15:04:05.000"))
+	}
+
+	// 验证响应的顺序
+	for i, item := range responseItems {
+		expectedStatusCode := fmt.Sprintf("%d", 200+i)
+		if item.Path != expectedStatusCode {
+			t.Errorf("响应 %d 状态码不匹配: 期望 %s, 实际 %s", i+1, expectedStatusCode, item.Path)
+		}
+		if item.Index != i+1 {
+			t.Errorf("响应 %d 接收顺序不匹配: 期望 %d, 实际 %d", i+1, i+1, item.Index)
+		}
+		t.Logf("响应 %d: %s - 时间: %s", i+1, item.Path, item.Timestamp.Format("15:04:05.000"))
+	}
+
+	// 验证时间顺序：检查是否所有请求都在所有响应之前
+	if len(requestItems) > 0 && len(responseItems) > 0 {
+		lastRequestTime := requestItems[len(requestItems)-1].Timestamp
+		firstResponseTime := responseItems[0].Timestamp
+		if lastRequestTime.After(firstResponseTime) {
+			t.Errorf("顺序错误: 最后一个请求时间 (%s) 晚于第一个响应时间 (%s)",
+				lastRequestTime.Format("15:04:05.000"),
+				firstResponseTime.Format("15:04:05.000"))
+		} else {
+			t.Logf("顺序正确: 所有请求都在响应之前")
+		}
+	}
+
+	t.Log("=== 测试完成 ===")
+}

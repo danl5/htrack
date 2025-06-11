@@ -471,7 +471,7 @@ func (m *Manager) parseHTTP2Messages(conn *Connection, data []byte) error {
 	// 获取HTTP/2解析器
 	http2Parser, ok := conn.Parser.(*parser.HTTP2Parser)
 	if !ok {
-		return nil
+		return fmt.Errorf("invalid HTTP/2 parser for connection %s", conn.ID)
 	}
 
 	// 根据方向处理不同类型的消息
@@ -641,7 +641,6 @@ func (m *Manager) handleParsedRequest(conn *Connection, request *types.HTTPReque
 	if m.callbacks.OnRequestParsed != nil {
 		m.callbacks.OnRequestParsed(request)
 	}
-
 	return nil
 }
 
@@ -692,6 +691,9 @@ func (m *Manager) handleParsedResponse(conn *Connection, response *types.HTTPRes
 			m.callbacks.OnTransactionComplete(tx)
 		}
 
+		// 清理缓冲区数据（在事务完成后）
+		conn.PacketBuffer.ClearAllData()
+
 		// 清理已完成的事务以防止内存泄漏
 		conn.Mu.Lock()
 		delete(conn.Transactions, tx.ID)
@@ -701,6 +703,8 @@ func (m *Manager) handleParsedResponse(conn *Connection, response *types.HTTPRes
 	if m.callbacks.OnResponseParsed != nil {
 		m.callbacks.OnResponseParsed(response)
 	}
+
+
 
 	return nil
 }

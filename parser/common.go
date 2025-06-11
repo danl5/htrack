@@ -29,15 +29,18 @@ type PacketProcessor struct {
 
 // PacketBuffer 数据包缓冲区
 type PacketBuffer struct {
-	data         []byte
-	requestData  []byte
-	responseData []byte
-	sequenceMap  map[uint64][]byte // 序列号 -> 数据
-	lastSequence uint64
-	missing      []uint64
-	reassembled  bool
-	lastUpdate   time.Time
-	mu           sync.RWMutex
+	requestData     []byte
+	responseData    []byte
+	requestSeqMap   map[uint64][]byte // 请求序列号 -> 数据
+	responseSeqMap  map[uint64][]byte // 响应序列号 -> 数据
+	lastReqSeq      uint64
+	lastRespSeq     uint64
+	reqMissing      []uint64
+	respMissing     []uint64
+	reqReassembled  bool
+	respReassembled bool
+	lastUpdate      time.Time
+	mu              sync.RWMutex
 }
 
 // NewPacketProcessor 创建新的数据包处理器
@@ -59,25 +62,41 @@ func (pp *PacketProcessor) ProcessPacket(connectionID string, data []byte, seque
 	buffer := pp.getOrCreateBuffer(connectionID)
 
 	// 添加数据到缓冲区
-	if err := buffer.addData(data, sequenceNum); err != nil {
+	if err := buffer.addDataWithDirection(data, sequenceNum, direction); err != nil {
 		return nil, err
 	}
 
 	// 尝试重组数据
-	if err := buffer.reassemble(); err != nil {
+	if err := buffer.reassembleByDirection(direction); err != nil {
 		return nil, err
 	}
 
+	// 检查数据是否完整
+	var reassembled bool
+	if direction == types.DirectionClientToServer || direction == types.DirectionRequest {
+		reassembled = buffer.reqReassembled
+	} else {
+		reassembled = buffer.respReassembled
+	}
+
 	// 如果数据还不完整，返回等待更多数据
-	if !buffer.reassembled {
+	if !reassembled {
 		return &ProcessResult{
 			Status:    StatusIncomplete,
 			Direction: direction,
 		}, nil
 	}
 
+	// 获取相应方向的数据
+	var targetData []byte
+	if direction == types.DirectionClientToServer || direction == types.DirectionRequest {
+		targetData = buffer.GetRequestData()
+	} else {
+		targetData = buffer.GetResponseData()
+	}
+
 	// 检测HTTP版本
-	version := pp.detectHTTPVersion(buffer.data)
+	version := pp.detectHTTPVersion(targetData)
 	parser, exists := pp.parsers[version]
 	if !exists {
 		return nil, errors.New("unsupported HTTP version")
@@ -90,9 +109,9 @@ func (pp *PacketProcessor) ProcessPacket(connectionID string, data []byte, seque
 		Status:    StatusComplete,
 	}
 
-	if direction == types.DirectionClientToServer {
+	if direction == types.DirectionClientToServer || direction == types.DirectionRequest {
 		// 解析请求
-		reqs, err := parser.ParseRequest(connectionID, buffer.data)
+		reqs, err := parser.ParseRequest(connectionID, targetData)
 		if err != nil {
 			return nil, err
 		}
@@ -101,7 +120,7 @@ func (pp *PacketProcessor) ProcessPacket(connectionID string, data []byte, seque
 		}
 	} else {
 		// 解析响应
-		resps, err := parser.ParseResponse(connectionID, buffer.data)
+		resps, err := parser.ParseResponse(connectionID, targetData)
 		if err != nil {
 			return nil, err
 		}
@@ -138,9 +157,11 @@ const (
 // NewPacketBuffer 创建新的数据包缓冲区
 func NewPacketBuffer(size int) *PacketBuffer {
 	return &PacketBuffer{
-		sequenceMap: make(map[uint64][]byte),
-		lastUpdate:  time.Now(),
-		data:        make([]byte, 0, size),
+		requestSeqMap:  make(map[uint64][]byte),
+		responseSeqMap: make(map[uint64][]byte),
+		lastUpdate:     time.Now(),
+		requestData:    make([]byte, 0, size/2),
+		responseData:   make([]byte, 0, size/2),
 	}
 }
 
@@ -149,8 +170,9 @@ func (pp *PacketProcessor) getOrCreateBuffer(connectionID string) *PacketBuffer 
 	buffer, exists := pp.buffers[connectionID]
 	if !exists {
 		buffer = &PacketBuffer{
-			sequenceMap: make(map[uint64][]byte),
-			lastUpdate:  time.Now(),
+			requestSeqMap:  make(map[uint64][]byte),
+			responseSeqMap: make(map[uint64][]byte),
+			lastUpdate:     time.Now(),
 		}
 		pp.buffers[connectionID] = buffer
 	}
@@ -194,18 +216,27 @@ func (pp *PacketProcessor) detectHTTPVersion(data []byte) types.HTTPVersion {
 
 // PacketBuffer 方法
 
-// addData 添加数据
-func (pb *PacketBuffer) addData(data []byte, sequenceNum uint64) error {
+// addDataWithDirection 按方向添加数据
+func (pb *PacketBuffer) addDataWithDirection(data []byte, sequenceNum uint64, direction types.Direction) error {
 	pb.lastUpdate = time.Now()
 
-	// 检查是否已存在
-	if _, exists := pb.sequenceMap[sequenceNum]; exists {
-		return nil // 重复数据，忽略
+	if direction == types.DirectionClientToServer || direction == types.DirectionRequest {
+		// 检查是否已存在
+		if _, exists := pb.requestSeqMap[sequenceNum]; exists {
+			return nil // 重复数据，忽略
+		}
+		// 存储请求数据
+		pb.requestSeqMap[sequenceNum] = make([]byte, len(data))
+		copy(pb.requestSeqMap[sequenceNum], data)
+	} else {
+		// 检查是否已存在
+		if _, exists := pb.responseSeqMap[sequenceNum]; exists {
+			return nil // 重复数据，忽略
+		}
+		// 存储响应数据
+		pb.responseSeqMap[sequenceNum] = make([]byte, len(data))
+		copy(pb.responseSeqMap[sequenceNum], data)
 	}
-
-	// 存储数据
-	pb.sequenceMap[sequenceNum] = make([]byte, len(data))
-	copy(pb.sequenceMap[sequenceNum], data)
 
 	return nil
 }
@@ -221,14 +252,19 @@ func (pb *PacketBuffer) AddPacket(data []byte, direction types.Direction) error 
 	} else if direction == types.DirectionResponse {
 		pb.responseData = append(pb.responseData, data...)
 	}
-	// Keep the old behavior for backward compatibility
-	pb.data = append(pb.data, data...)
 	return nil
 }
 
-// GetReassembledData 获取重组后的数据
+// GetReassembledData 获取重组后的数据（向后兼容，返回请求和响应数据的合并）
 func (pb *PacketBuffer) GetReassembledData() []byte {
-	return pb.data
+	pb.mu.RLock()
+	defer pb.mu.RUnlock()
+
+	// 为了向后兼容，返回请求和响应数据的合并
+	var combined []byte
+	combined = append(combined, pb.requestData...)
+	combined = append(combined, pb.responseData...)
+	return combined
 }
 
 // GetRequestData 获取请求数据
@@ -245,15 +281,30 @@ func (pb *PacketBuffer) GetResponseData() []byte {
 	return pb.responseData
 }
 
-// reassemble 重组数据
-func (pb *PacketBuffer) reassemble() error {
-	if pb.reassembled {
+// reassembleByDirection 按方向重组数据
+func (pb *PacketBuffer) reassembleByDirection(direction types.Direction) error {
+	if direction == types.DirectionClientToServer || direction == types.DirectionRequest {
+		if pb.reqReassembled {
+			return nil
+		}
+		return pb.reassembleRequest()
+	} else {
+		if pb.respReassembled {
+			return nil
+		}
+		return pb.reassembleResponse()
+	}
+}
+
+// reassembleRequest 重组请求数据
+func (pb *PacketBuffer) reassembleRequest() error {
+	if len(pb.requestSeqMap) == 0 {
 		return nil
 	}
 
 	// 找到最小序列号
 	var minSeq uint64 = ^uint64(0)
-	for seq := range pb.sequenceMap {
+	for seq := range pb.requestSeqMap {
 		if seq < minSeq {
 			minSeq = seq
 		}
@@ -264,10 +315,10 @@ func (pb *PacketBuffer) reassemble() error {
 	currentSeq := minSeq
 
 	for {
-		data, exists := pb.sequenceMap[currentSeq]
+		data, exists := pb.requestSeqMap[currentSeq]
 		if !exists {
 			// 缺少数据包
-			pb.missing = append(pb.missing, currentSeq)
+			pb.reqMissing = append(pb.reqMissing, currentSeq)
 			return nil // 等待更多数据
 		}
 
@@ -275,14 +326,56 @@ func (pb *PacketBuffer) reassemble() error {
 		currentSeq++
 
 		// 检查是否有更多连续数据
-		if _, exists := pb.sequenceMap[currentSeq]; !exists {
+		if _, exists := pb.requestSeqMap[currentSeq]; !exists {
 			break
 		}
 	}
 
-	pb.data = buffer.Bytes()
-	pb.lastSequence = currentSeq - 1
-	pb.reassembled = true
+	pb.requestData = buffer.Bytes()
+	pb.lastReqSeq = currentSeq - 1
+	pb.reqReassembled = true
+
+	return nil
+}
+
+// reassembleResponse 重组响应数据
+func (pb *PacketBuffer) reassembleResponse() error {
+	if len(pb.responseSeqMap) == 0 {
+		return nil
+	}
+
+	// 找到最小序列号
+	var minSeq uint64 = ^uint64(0)
+	for seq := range pb.responseSeqMap {
+		if seq < minSeq {
+			minSeq = seq
+		}
+	}
+
+	// 按序列号重组数据
+	var buffer bytes.Buffer
+	currentSeq := minSeq
+
+	for {
+		data, exists := pb.responseSeqMap[currentSeq]
+		if !exists {
+			// 缺少数据包
+			pb.respMissing = append(pb.respMissing, currentSeq)
+			return nil // 等待更多数据
+		}
+
+		buffer.Write(data)
+		currentSeq++
+
+		// 检查是否有更多连续数据
+		if _, exists := pb.responseSeqMap[currentSeq]; !exists {
+			break
+		}
+	}
+
+	pb.responseData = buffer.Bytes()
+	pb.lastRespSeq = currentSeq - 1
+	pb.respReassembled = true
 
 	return nil
 }
@@ -469,6 +562,47 @@ func ParseChunkSize(line []byte) (int64, error) {
 	}
 
 	return size, nil
+}
+
+// ClearRequestData 清理请求数据
+func (pb *PacketBuffer) ClearRequestData() {
+	pb.mu.Lock()
+	defer pb.mu.Unlock()
+	
+	pb.requestData = nil
+	pb.requestSeqMap = make(map[uint64][]byte)
+	pb.lastReqSeq = 0
+	pb.reqMissing = nil
+	pb.reqReassembled = false
+}
+
+// ClearResponseData 清理响应数据
+func (pb *PacketBuffer) ClearResponseData() {
+	pb.mu.Lock()
+	defer pb.mu.Unlock()
+	
+	pb.responseData = nil
+	pb.responseSeqMap = make(map[uint64][]byte)
+	pb.lastRespSeq = 0
+	pb.respMissing = nil
+	pb.respReassembled = false
+}
+
+// ClearAllData 清理所有数据
+func (pb *PacketBuffer) ClearAllData() {
+	pb.mu.Lock()
+	defer pb.mu.Unlock()
+	
+	pb.requestData = nil
+	pb.responseData = nil
+	pb.requestSeqMap = make(map[uint64][]byte)
+	pb.responseSeqMap = make(map[uint64][]byte)
+	pb.lastReqSeq = 0
+	pb.lastRespSeq = 0
+	pb.reqMissing = nil
+	pb.respMissing = nil
+	pb.reqReassembled = false
+	pb.respReassembled = false
 }
 
 // CleanupBuffers 清理过期缓冲区

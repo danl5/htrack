@@ -119,12 +119,9 @@ func TestHTTP2ParserFrameProcessing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("解析连接前导失败: %v", err)
 	}
-	if len(reqs) == 0 {
-		t.Fatal("连接前导应该返回请求对象")
-	}
-	req := reqs[0]
-	if req.Method != "PRI" {
-		t.Errorf("Method = %v, want PRI", req.Method)
+	// 连接前导不再返回PRI请求对象
+	if len(reqs) != 0 {
+		t.Errorf("连接前导应该返回空数组，但返回了 %d 个请求", len(reqs))
 	}
 
 	// 测试SETTINGS帧
@@ -152,7 +149,8 @@ func TestHTTP2ParserFrameProcessing(t *testing.T) {
 	if len(reqs) == 0 {
 		t.Fatal("HEADERS帧应该返回请求对象")
 	}
-	req = reqs[0]
+	req := reqs[0]
+	_ = req // 使用req变量避免未使用警告
 }
 
 // TestFrameHeaderWriting 测试帧头写入

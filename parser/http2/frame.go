@@ -142,7 +142,8 @@ func ParseFrameHeader(data []byte) (FrameHeader, error) {
 		return FrameHeader{}, errors.New("frame header too short")
 	}
 
-	length := binary.BigEndian.Uint32(data[0:4]) >> 8
+	// HTTP/2帧头格式：前3字节是长度，第4字节是类型
+	length := uint32(data[0])<<16 | uint32(data[1])<<8 | uint32(data[2])
 	frameType := FrameType(data[3])
 	flags := FrameFlags(data[4])
 	streamID := binary.BigEndian.Uint32(data[5:9]) & 0x7fffffff

@@ -26,29 +26,9 @@ func TestHTTP2HeadersDataIntegration(t *testing.T) {
 		if err != nil {
 			t.Fatalf("解析响应HEADERS帧失败: %v", err)
 		}
-		if len(resps1) == 0 {
-			t.Fatal("解析响应HEADERS帧返回空数组")
-		}
-		resp1 := resps1[0]
-		if resp1 == nil {
-			t.Fatal("解析响应HEADERS帧返回nil对象")
-		}
-
-		// 验证HEADERS帧解析结果
-		if resp1.StatusCode != 200 {
-			t.Errorf("期望状态码为200，实际为: %d", resp1.StatusCode)
-		}
-		if resp1.Headers.Get("content-type") != "application/json" {
-			t.Errorf("期望content-type为'application/json'，实际为: %s", resp1.Headers.Get("content-type"))
-		}
-		if resp1.Headers.Get("server") != "test-server/1.0" {
-			t.Errorf("期望server为'test-server/1.0'，实际为: %s", resp1.Headers.Get("server"))
-		}
-		if resp1.Complete {
-			t.Error("HEADERS帧不应该标记响应为完整（没有END_STREAM标志）")
-		}
-		if len(resp1.Body) != 0 {
-			t.Error("HEADERS帧不应该包含响应体数据")
+		// 根据HTTP/2协议，HEADERS帧没有END_STREAM标志时不应该返回响应对象
+		if len(resps1) != 0 {
+			t.Fatal("解析响应HEADERS帧应该返回空数组（没有END_STREAM标志）")
 		}
 
 		// 2. 然后发送响应DATA帧
@@ -104,29 +84,10 @@ func TestHTTP2HeadersDataIntegration(t *testing.T) {
 		if err != nil {
 			t.Fatalf("解析请求HEADERS帧失败: %v", err)
 		}
-		if len(reqs1) == 0 {
-			t.Fatal("解析请求HEADERS帧返回空数组")
-		}
-		req1 := reqs1[0]
-		if req1 == nil {
-			t.Fatal("解析请求HEADERS帧返回nil对象")
-		}
-
-		// 验证HEADERS帧解析结果
-		if req1.Method != "GET" {
-			t.Errorf("期望请求方法为GET，实际为: %s", req1.Method)
-		}
-		if req1.Headers.Get("content-type") != "application/json" {
-			t.Errorf("期望content-type为'application/json'，实际为: %s", req1.Headers.Get("content-type"))
-		}
-		if req1.Headers.Get("user-agent") != "test-client/1.0" {
-			t.Errorf("期望user-agent为'test-client/1.0'，实际为: %s", req1.Headers.Get("user-agent"))
-		}
-		if req1.Complete {
-			t.Error("HEADERS帧不应该标记请求为完整（没有END_STREAM标志）")
-		}
-		if len(req1.Body) != 0 {
-			t.Error("HEADERS帧不应该包含请求体数据")
+		// 根据HTTP/2协议，HEADERS帧没有END_STREAM标志时不应该返回请求对象
+		// 因为请求还未完成，需要等待DATA帧
+		if len(reqs1) != 0 {
+			t.Error("HEADERS帧没有END_STREAM标志时不应该返回请求对象")
 		}
 
 		// 2. 然后发送请求DATA帧
