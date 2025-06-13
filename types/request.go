@@ -9,8 +9,8 @@ type HTTPRequest struct {
 	HTTPMessage // 嵌入基础消息结构
 
 	// 请求特有字段
-	Method   string      // HTTP方法
-	URL      *url.URL    // 请求URL
+	Method   string          // HTTP方法
+	URL      *url.URL        // 请求URL
 	Priority *StreamPriority // 流优先级（HTTP/2）
 
 	// 兼容性字段（保持向后兼容）
@@ -62,8 +62,6 @@ func (rb *RequestBuilder) AddFragment(fragment *RequestFragment) error {
 	// 尝试解析HTTP
 	return rb.parseHTTP()
 }
-
-
 
 // parseHTTP 解析HTTP请求
 func (rb *RequestBuilder) parseHTTP() error {

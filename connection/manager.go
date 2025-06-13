@@ -320,6 +320,10 @@ func (m *Manager) getOrCreateConnection(connectionID string, data []byte) (*Conn
 		httpParser = parser.NewHTTP2Parser()
 		streamManager = stream.NewManager(connectionID, true)
 
+	case types.TLS_OTHER:
+		// TLS协议支持，创建通用TLS解析器
+		httpParser = parser.NewTLSGenericParser()
+
 	default:
 		return nil, fmt.Errorf("unsupported HTTP version: %v", version)
 	}
@@ -381,7 +385,16 @@ func (m *Manager) DetectHTTPVersion(data []byte) types.HTTPVersion {
 	}
 
 	// 检测HTTP/1.x
-	return parser.NewHTTP1Parser().DetectVersion(data)
+	if version := parser.NewHTTP1Parser().DetectVersion(data); version != types.Unknown {
+		return version
+	}
+
+	// 检测TLS协议
+	if version := parser.NewTLSGenericParser().DetectVersion(data); version == types.TLS_OTHER {
+		return types.TLS_OTHER
+	}
+
+	return types.Unknown
 }
 
 // tryParseMessages 尝试解析消息
@@ -407,6 +420,11 @@ func (m *Manager) tryParseMessages(conn *Connection, packetInfo *types.PacketInf
 
 // tryParseHTTPMessages 尝试解析HTTP消息
 func (m *Manager) tryParseHTTPMessages(conn *Connection, data []byte, packetInfo *types.PacketInfo) error {
+	// 对于TLS协议，使用专门的解析逻辑
+	if conn.Version == types.TLS_OTHER {
+		return m.parseTLSMessages(conn, data, packetInfo)
+	}
+
 	// 检查是否有完整消息或者数据看起来像HTTP但格式错误
 	isComplete := conn.Parser.IsComplete(data)
 
@@ -812,6 +830,104 @@ func (m *Manager) performCleanup() {
 
 	// PacketBuffer是单个缓冲区，不需要额外清理
 	// 过期连接的清理已经包含了相关的缓冲区清理
+}
+
+// parseTLSMessages 解析TLS消息
+func (m *Manager) parseTLSMessages(conn *Connection, data []byte, packetInfo *types.PacketInfo) error {
+	// 获取TLS解析器
+	tlsParser, ok := conn.Parser.(*parser.TLSGenericParser)
+	if !ok {
+		return fmt.Errorf("invalid TLS parser for connection %s", conn.ID)
+	}
+
+	// 根据方向处理不同类型的消息
+	switch conn.LastDirection {
+	case types.DirectionRequest:
+		return m.parseTLSRequests(conn, tlsParser, data, packetInfo)
+	case types.DirectionResponse:
+		return m.parseTLSResponses(conn, tlsParser, data, packetInfo)
+	default:
+		// 对于TLS，如果没有明确方向，尝试作为请求处理
+		return m.parseTLSRequests(conn, tlsParser, data, packetInfo)
+	}
+}
+
+// parseTLSRequests 解析TLS请求
+func (m *Manager) parseTLSRequests(conn *Connection, parser *parser.TLSGenericParser, data []byte, packetInfo *types.PacketInfo) error {
+	requests, err := parser.ParseRequest(conn.ID, data, packetInfo)
+	if err != nil {
+		return fmt.Errorf("failed to parse TLS request: %v", err)
+	}
+
+	for _, req := range requests {
+		// 创建新的事务
+		txID := fmt.Sprintf("%s_%d", conn.ID, time.Now().UnixNano())
+		tx := &Transaction{
+			ID:        txID,
+			Request:   req,
+			CreatedAt: time.Now(),
+		}
+
+		conn.Mu.Lock()
+		conn.Transactions[txID] = tx
+		conn.Mu.Unlock()
+
+		// 更新统计
+		m.statistics.mu.Lock()
+		m.statistics.TotalRequests++
+		m.statistics.ActiveTransactions++
+		m.statistics.mu.Unlock()
+
+		// 发送请求事件
+		if m.callbacks != nil && m.callbacks.OnRequestParsed != nil {
+			m.callbacks.OnRequestParsed(req)
+		}
+	}
+
+	return nil
+}
+
+// parseTLSResponses 解析TLS响应
+func (m *Manager) parseTLSResponses(conn *Connection, parser *parser.TLSGenericParser, data []byte, packetInfo *types.PacketInfo) error {
+	responses, err := parser.ParseResponse(conn.ID, data, packetInfo)
+	if err != nil {
+		return fmt.Errorf("failed to parse TLS response: %v", err)
+	}
+
+	for _, resp := range responses {
+		// 对于TLS，创建独立的响应事务
+		txID := fmt.Sprintf("%s_%d", conn.ID, time.Now().UnixNano())
+		tx := &Transaction{
+			ID:        txID,
+			Response:  resp,
+			CreatedAt: time.Now(),
+		}
+
+		// 标记事务完成
+		now := time.Now()
+		tx.CompletedAt = &now
+
+		conn.Mu.Lock()
+		conn.Transactions[txID] = tx
+		conn.Mu.Unlock()
+
+		// 更新统计
+		m.statistics.mu.Lock()
+		m.statistics.TotalResponses++
+		m.statistics.mu.Unlock()
+
+		// 发送响应事件
+		if m.callbacks != nil && m.callbacks.OnResponseParsed != nil {
+			m.callbacks.OnResponseParsed(resp)
+		}
+
+		// 发送事务完成事件
+		if m.callbacks != nil && m.callbacks.OnTransactionComplete != nil {
+			m.callbacks.OnTransactionComplete(tx)
+		}
+	}
+
+	return nil
 }
 
 // DefaultConfig 默认配置

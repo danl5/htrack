@@ -25,6 +25,10 @@ type HTTPMessage struct {
 	// 网络信息
 	TCPTuple *TCPTuple // TCP四元组信息
 
+	// 进程信息
+	PID         uint32 // 进程ID
+	ProcessName string // 进程名称
+
 	// HTTP/2特有字段
 	StreamID *uint32 // 流ID（HTTP/2）
 
@@ -69,6 +73,12 @@ func NewBaseMessageBuilder() *BaseMessageBuilder {
 		},
 		fragments: make(map[uint64]*Fragment),
 	}
+}
+
+// SetProcessInfo 设置进程信息
+func (bmb *BaseMessageBuilder) SetProcessInfo(pid uint32, processName string) {
+	bmb.message.PID = pid
+	bmb.message.ProcessName = processName
 }
 
 // AddFragment 添加数据片段

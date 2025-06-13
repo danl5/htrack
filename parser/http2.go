@@ -407,7 +407,7 @@ func (p *HTTP2Parser) parseDataFrame(connectionID string, header http2.FrameHead
 
 	// 如果请求阶段结束，构建完整的请求
 	if stream.RequestComplete && !stream.IsResponse {
-		request, err := p.buildDataRequest(stream)
+		request, err := p.buildDataRequest(stream, packetInfo)
 		// 请求完成后，标记为响应阶段
 		if endStream {
 			stream.IsResponse = true
@@ -515,14 +515,16 @@ func (p *HTTP2Parser) decodeCompleteHeaders(connectionID string, stream *HTTP2St
 	// 构建HTTP请求
 	request := &types.HTTPRequest{
 		HTTPMessage: types.HTTPMessage{
-			Headers:    headers,
-			Proto:      "HTTP/2.0",
-			ProtoMajor: 2,
-			ProtoMinor: 0,
-			Timestamp:  time.Now(),
-			StreamID:   &stream.ID,
-			RawData:    completeHeaderBlock,
-			TCPTuple:   packetInfo.TCPTuple,
+			Headers:     headers,
+			Proto:       "HTTP/2.0",
+			ProtoMajor:  2,
+			ProtoMinor:  0,
+			Timestamp:   time.Now(),
+			StreamID:    &stream.ID,
+			RawData:     completeHeaderBlock,
+			TCPTuple:    packetInfo.TCPTuple,
+			PID:         packetInfo.PID,
+			ProcessName: packetInfo.ProcessName,
 		},
 	}
 
@@ -652,14 +654,16 @@ func (p *HTTP2Parser) parseResponseHeadersFrame(connectionID string, header http
 	// 构建HTTP响应
 	response := &types.HTTPResponse{
 		HTTPMessage: types.HTTPMessage{
-			Headers:    headers,
-			Proto:      "HTTP/2.0",
-			ProtoMajor: 2,
-			ProtoMinor: 0,
-			Timestamp:  time.Now(),
-			StreamID:   &header.StreamID,
-			RawData:    data,
-			TCPTuple:   packetInfo.TCPTuple,
+			Headers:     headers,
+			Proto:       "HTTP/2.0",
+			ProtoMajor:  2,
+			ProtoMinor:  0,
+			Timestamp:   time.Now(),
+			StreamID:    &header.StreamID,
+			RawData:     data,
+			TCPTuple:    packetInfo.TCPTuple,
+			PID:         packetInfo.PID,
+			ProcessName: packetInfo.ProcessName,
 		},
 	}
 
@@ -744,12 +748,14 @@ func (p *HTTP2Parser) parseResponseDataFrame(connectionID string, header http2.F
 		// 创建新的响应对象（仅包含数据）
 		response = &types.HTTPResponse{
 			HTTPMessage: types.HTTPMessage{
-				Body:      data,
-				Timestamp: time.Now(),
-				StreamID:  &header.StreamID,
-				Complete:  endStream,
-				RawData:   data,
-				TCPTuple:  packetInfo.TCPTuple,
+				Body:        data,
+				Timestamp:   time.Now(),
+				StreamID:    &header.StreamID,
+				Complete:    endStream,
+				RawData:     data,
+				TCPTuple:    packetInfo.TCPTuple,
+				PID:         packetInfo.PID,
+				ProcessName: packetInfo.ProcessName,
 			},
 		}
 		stream.Response = response
@@ -862,7 +868,7 @@ func validateHTTP2Frame(data []byte) types.HTTPVersion {
 }
 
 // buildDataRequest 构建包含累积数据的请求
-func (p *HTTP2Parser) buildDataRequest(stream *HTTP2Stream) (*types.HTTPRequest, error) {
+func (p *HTTP2Parser) buildDataRequest(stream *HTTP2Stream, packetInfo *types.PacketInfo) (*types.HTTPRequest, error) {
 	// 合并请求阶段的数据片段
 	var completeData []byte
 	for _, fragment := range stream.RequestDataFragments {
@@ -884,11 +890,14 @@ func (p *HTTP2Parser) buildDataRequest(stream *HTTP2Stream) (*types.HTTPRequest,
 	// 否则创建新的数据请求（仅数据帧的情况）
 	request := &types.HTTPRequest{
 		HTTPMessage: types.HTTPMessage{
-			Body:      completeData,
-			Timestamp: time.Now(),
-			StreamID:  &stream.ID,
-			Complete:  stream.RequestComplete,
-			RawData:   completeData,
+			Body:        completeData,
+			Timestamp:   time.Now(),
+			StreamID:    &stream.ID,
+			Complete:    stream.RequestComplete,
+			RawData:     completeData,
+			TCPTuple:    packetInfo.TCPTuple,
+			PID:         packetInfo.PID,
+			ProcessName: packetInfo.ProcessName,
 		},
 	}
 

@@ -10,8 +10,10 @@ type TCPTuple struct {
 
 // PacketInfo 数据包信息
 type PacketInfo struct {
-	Data      []byte    // 原始数据
-	Direction Direction // 数据方向
-	TCPTuple  *TCPTuple // TCP四元组信息
-	TimeDiff  uint64    // 时间偏移
+	Data        []byte    // 原始数据
+	Direction   Direction // 数据方向
+	TCPTuple    *TCPTuple // TCP四元组信息
+	TimeDiff    uint64    // 时间偏移
+	PID         uint32    // 进程ID
+	ProcessName string    // 进程名称
 }

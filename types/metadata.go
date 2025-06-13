@@ -13,6 +13,7 @@ const (
 	HTTP11
 	HTTP2
 	HTTP3
+	TLS_OTHER // 其他TLS协议
 	Unknown
 )
 
@@ -24,9 +25,23 @@ func (v HTTPVersion) String() string {
 		return "HTTP/1.1"
 	case HTTP2:
 		return "HTTP/2"
+	case HTTP3:
+		return "HTTP/3"
+	case TLS_OTHER:
+		return "TLS/Other"
 	default:
 		return "Unknown"
 	}
+}
+
+// IsTLS 检查是否为TLS协议
+func (v HTTPVersion) IsTLS() bool {
+	return v == TLS_OTHER
+}
+
+// IsHTTP 检查是否为HTTP协议
+func (v HTTPVersion) IsHTTP() bool {
+	return v == HTTP10 || v == HTTP11 || v == HTTP2 || v == HTTP3
 }
 
 // ConnectionMetadata 连接元数据

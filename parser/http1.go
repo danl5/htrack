@@ -134,6 +134,8 @@ func (p *HTTP1Parser) ParseRequest(connectionID string, data []byte, packetInfo 
 			RawData:       make([]byte, len(data)),
 			Complete:      false,
 			TCPTuple:      packetInfo.TCPTuple,
+			PID:           packetInfo.PID,
+			ProcessName:   packetInfo.ProcessName,
 		},
 		Method: method,
 		URL:    parsedURL,
@@ -251,6 +253,8 @@ func (p *HTTP1Parser) ParseResponse(connectionID string, data []byte, packetInfo
 			RawData:       make([]byte, len(data)),
 			Complete:      false,
 			TCPTuple:      packetInfo.TCPTuple,
+			PID:           packetInfo.PID,
+			ProcessName:   packetInfo.ProcessName,
 		},
 		StatusCode:       statusCode,
 		Status:           status,
@@ -269,9 +273,30 @@ func (p *HTTP1Parser) ParseResponse(connectionID string, data []byte, packetInfo
 }
 
 // DetectVersion 检测HTTP版本
+// httpMethods HTTP方法集合，使用map提高查找效率
+var httpMethods = map[string]bool{
+	"GET":       true,
+	"POST":      true,
+	"PUT":       true,
+	"DELETE":    true,
+	"HEAD":      true,
+	"OPTIONS":   true,
+	"PATCH":     true,
+	"TRACE":     true,
+	"CONNECT":   true,
+	"PROPFIND":  true,
+	"PROPPATCH": true,
+	"MKCOL":     true,
+	"COPY":      true,
+	"MOVE":      true,
+	"LOCK":      true,
+	"UNLOCK":    true,
+}
+
 func (p *HTTP1Parser) DetectVersion(data []byte) types.HTTPVersion {
+	// 数据不足时返回Unknown，等待更多数据
 	if len(data) < 8 {
-		return types.HTTP11
+		return types.Unknown
 	}
 
 	// 查找第一行
@@ -283,27 +308,51 @@ func (p *HTTP1Parser) DetectVersion(data []byte) types.HTTPVersion {
 			if len(data) > 1024 {
 				return types.Unknown // 第一行太长，可能不是HTTP
 			}
-			firstLineEnd = len(data)
+			// 数据不完整，等待更多数据
+			return types.Unknown
 		}
+	}
+
+	// 检查第一行长度是否合理
+	if firstLineEnd > 8192 { // 8KB限制
+		return types.Unknown
 	}
 
 	firstLine := string(data[:firstLineEnd])
 
-	// HTTP/1.x请求行检测
-	httpMethods := []string{
-		"GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS", "PATCH",
-		"TRACE", "CONNECT", "PROPFIND", "PROPPATCH", "MKCOL",
-		"COPY", "MOVE", "LOCK", "UNLOCK",
-	}
-
-	for _, method := range httpMethods {
-		if strings.HasPrefix(firstLine, method+" ") {
-			// 验证请求行格式: METHOD PATH HTTP/VERSION
-			parts := strings.Fields(firstLine)
-			if len(parts) >= 3 && strings.HasPrefix(parts[2], "HTTP/") {
-				return parseHTTPVersion(parts[2])
+	// 检测HTTP响应：HTTP/1.1 200 OK
+	if strings.HasPrefix(firstLine, "HTTP/") {
+		parts := strings.Fields(firstLine)
+		if len(parts) >= 2 {
+			// 验证状态码是否为数字
+			if len(parts[1]) == 3 {
+				for _, c := range parts[1] {
+					if c < '0' || c > '9' {
+						return types.Unknown
+					}
+				}
+				return parseHTTPVersion(parts[0])
 			}
 		}
+		return types.Unknown
+	}
+
+	// HTTP/1.x请求行检测
+	// 快速检查：查找第一个空格
+	spaceIdx := bytes.IndexByte(data[:firstLineEnd], ' ')
+	if spaceIdx == -1 || spaceIdx == 0 {
+		return types.Unknown
+	}
+
+	method := string(data[:spaceIdx])
+	if !httpMethods[method] {
+		return types.Unknown
+	}
+
+	// 验证请求行格式: METHOD PATH HTTP/VERSION
+	parts := strings.Fields(firstLine)
+	if len(parts) >= 3 && strings.HasPrefix(parts[2], "HTTP/") {
+		return parseHTTPVersion(parts[2])
 	}
 
 	return types.Unknown
