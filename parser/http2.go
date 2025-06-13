@@ -147,7 +147,7 @@ func (p *HTTP2Parser) getOrCreateStream(connID string, streamID uint32) *HTTP2St
 }
 
 // ParseRequest 解析HTTP/2请求
-func (p *HTTP2Parser) ParseRequest(connectionID string, data []byte) ([]*types.HTTPRequest, error) {
+func (p *HTTP2Parser) ParseRequest(connectionID string, data []byte, packetInfo *types.PacketInfo) ([]*types.HTTPRequest, error) {
 	var requests []*types.HTTPRequest
 	offset := 0
 
@@ -190,7 +190,7 @@ func (p *HTTP2Parser) ParseRequest(connectionID string, data []byte) ([]*types.H
 		}
 
 		frameData := data[offset+9 : frameEnd]
-		req, err := p.parseFrame(connectionID, header, frameData)
+		req, err := p.parseFrame(connectionID, header, frameData, packetInfo)
 		if err != nil {
 			return requests, fmt.Errorf("failed to parse frame (stream %d, type %d): %w", header.StreamID, header.Type, err)
 		}
@@ -206,7 +206,7 @@ func (p *HTTP2Parser) ParseRequest(connectionID string, data []byte) ([]*types.H
 }
 
 // ParseResponse 解析HTTP/2响应 - 统一接口，返回所有解析到的响应
-func (p *HTTP2Parser) ParseResponse(connectionID string, data []byte) ([]*types.HTTPResponse, error) {
+func (p *HTTP2Parser) ParseResponse(connectionID string, data []byte, packetInfo *types.PacketInfo) ([]*types.HTTPResponse, error) {
 	var responses []*types.HTTPResponse
 	offset := 0
 
@@ -239,7 +239,7 @@ func (p *HTTP2Parser) ParseResponse(connectionID string, data []byte) ([]*types.
 		}
 
 		frameData := data[offset+9 : frameEnd]
-		resp, err := p.parseResponseFrame(connectionID, header, frameData)
+		resp, err := p.parseResponseFrame(connectionID, header, frameData, packetInfo)
 		if err != nil {
 			return responses, fmt.Errorf("failed to parse response frame (stream %d, type %d): %w", header.StreamID, header.Type, err)
 		}
@@ -285,16 +285,16 @@ func (p *HTTP2Parser) GetRequiredBytes(data []byte) int {
 }
 
 // parseFrame 解析单个帧
-func (p *HTTP2Parser) parseFrame(connectionID string, header http2.FrameHeader, data []byte) (*types.HTTPRequest, error) {
+func (p *HTTP2Parser) parseFrame(connectionID string, header http2.FrameHeader, data []byte, packetInfo *types.PacketInfo) (*types.HTTPRequest, error) {
 	switch header.Type {
 	case http2.FrameHeaders:
-		return p.parseHeadersFrame(connectionID, header, data)
+		return p.parseHeadersFrame(connectionID, header, data, packetInfo)
 	case http2.FrameData:
-		return p.parseDataFrame(connectionID, header, data)
+		return p.parseDataFrame(connectionID, header, data, packetInfo)
 	case http2.FrameSettings:
-		return p.parseSettingsFrame(header, data)
+		return p.parseSettingsFrame(header, data, packetInfo)
 	case http2.FrameContinuation:
-		return p.parseContinuationFrame(connectionID, header, data)
+		return p.parseContinuationFrame(connectionID, header, data, packetInfo)
 	default:
 		// 其他帧类型暂时忽略
 		return nil, nil
@@ -302,7 +302,7 @@ func (p *HTTP2Parser) parseFrame(connectionID string, header http2.FrameHeader, 
 }
 
 // parseHeadersFrame 解析HEADERS帧
-func (p *HTTP2Parser) parseHeadersFrame(connectionID string, header http2.FrameHeader, data []byte) (*types.HTTPRequest, error) {
+func (p *HTTP2Parser) parseHeadersFrame(connectionID string, header http2.FrameHeader, data []byte, packetInfo *types.PacketInfo) (*types.HTTPRequest, error) {
 	if header.StreamID == 0 {
 		return nil, errors.New("HEADERS frame with stream ID 0")
 	}
@@ -353,11 +353,11 @@ func (p *HTTP2Parser) parseHeadersFrame(connectionID string, header http2.FrameH
 	}
 
 	// 头部完整，进行解码
-	return p.decodeCompleteHeaders(connectionID, stream)
+	return p.decodeCompleteHeaders(connectionID, stream, packetInfo)
 }
 
 // parseDataFrame 解析DATA帧
-func (p *HTTP2Parser) parseDataFrame(connectionID string, header http2.FrameHeader, data []byte) (*types.HTTPRequest, error) {
+func (p *HTTP2Parser) parseDataFrame(connectionID string, header http2.FrameHeader, data []byte, packetInfo *types.PacketInfo) (*types.HTTPRequest, error) {
 	if header.StreamID == 0 {
 		return nil, errors.New("DATA frame with stream ID 0")
 	}
@@ -422,7 +422,7 @@ func (p *HTTP2Parser) parseDataFrame(connectionID string, header http2.FrameHead
 }
 
 // parseSettingsFrame 解析SETTINGS帧
-func (p *HTTP2Parser) parseSettingsFrame(header http2.FrameHeader, data []byte) (*types.HTTPRequest, error) {
+func (p *HTTP2Parser) parseSettingsFrame(header http2.FrameHeader, data []byte, packetInfo *types.PacketInfo) (*types.HTTPRequest, error) {
 	if header.StreamID != 0 {
 		return nil, errors.New("SETTINGS frame with non-zero stream ID")
 	}
@@ -450,7 +450,7 @@ func (p *HTTP2Parser) parseSettingsFrame(header http2.FrameHeader, data []byte) 
 }
 
 // parseContinuationFrame 解析CONTINUATION帧
-func (p *HTTP2Parser) parseContinuationFrame(connectionID string, header http2.FrameHeader, data []byte) (*types.HTTPRequest, error) {
+func (p *HTTP2Parser) parseContinuationFrame(connectionID string, header http2.FrameHeader, data []byte, packetInfo *types.PacketInfo) (*types.HTTPRequest, error) {
 	if header.StreamID == 0 {
 		return nil, errors.New("CONTINUATION frame with stream ID 0")
 	}
@@ -474,11 +474,11 @@ func (p *HTTP2Parser) parseContinuationFrame(connectionID string, header http2.F
 
 	// 头部完整，进行解码
 	stream.AwaitingContinuation = false
-	return p.decodeCompleteHeaders(connectionID, stream)
+	return p.decodeCompleteHeaders(connectionID, stream, packetInfo)
 }
 
 // decodeCompleteHeaders 解码完整的头部块序列
-func (p *HTTP2Parser) decodeCompleteHeaders(connectionID string, stream *HTTP2Stream) (*types.HTTPRequest, error) {
+func (p *HTTP2Parser) decodeCompleteHeaders(connectionID string, stream *HTTP2Stream, packetInfo *types.PacketInfo) (*types.HTTPRequest, error) {
 	// 获取连接以访问其hpack decoder
 	conn, exists := p.GetConnection(connectionID)
 	if !exists {
@@ -522,6 +522,7 @@ func (p *HTTP2Parser) decodeCompleteHeaders(connectionID string, stream *HTTP2St
 			Timestamp:  time.Now(),
 			StreamID:   &stream.ID,
 			RawData:    completeHeaderBlock,
+			TCPTuple:   packetInfo.TCPTuple,
 		},
 	}
 
@@ -581,19 +582,19 @@ func (p *HTTP2Parser) decodeCompleteHeaders(connectionID string, stream *HTTP2St
 }
 
 // parseResponseFrame 解析响应帧
-func (p *HTTP2Parser) parseResponseFrame(connectionID string, header http2.FrameHeader, data []byte) (*types.HTTPResponse, error) {
+func (p *HTTP2Parser) parseResponseFrame(connectionID string, header http2.FrameHeader, data []byte, packetInfo *types.PacketInfo) (*types.HTTPResponse, error) {
 	switch header.Type {
 	case http2.FrameHeaders:
-		return p.parseResponseHeadersFrame(connectionID, header, data)
+		return p.parseResponseHeadersFrame(connectionID, header, data, packetInfo)
 	case http2.FrameData:
-		return p.parseResponseDataFrame(connectionID, header, data)
+		return p.parseResponseDataFrame(connectionID, header, data, packetInfo)
 	default:
 		return nil, nil
 	}
 }
 
 // parseResponseHeadersFrame 解析响应HEADERS帧（带连接ID）
-func (p *HTTP2Parser) parseResponseHeadersFrame(connectionID string, header http2.FrameHeader, data []byte) (*types.HTTPResponse, error) {
+func (p *HTTP2Parser) parseResponseHeadersFrame(connectionID string, header http2.FrameHeader, data []byte, packetInfo *types.PacketInfo) (*types.HTTPResponse, error) {
 	if header.StreamID == 0 {
 		return nil, errors.New("response HEADERS frame with stream ID 0")
 	}
@@ -658,6 +659,7 @@ func (p *HTTP2Parser) parseResponseHeadersFrame(connectionID string, header http
 			Timestamp:  time.Now(),
 			StreamID:   &header.StreamID,
 			RawData:    data,
+			TCPTuple:   packetInfo.TCPTuple,
 		},
 	}
 
@@ -694,7 +696,7 @@ func (p *HTTP2Parser) parseResponseHeadersFrame(connectionID string, header http
 }
 
 // parseResponseDataFrame 解析响应DATA帧
-func (p *HTTP2Parser) parseResponseDataFrame(connectionID string, header http2.FrameHeader, data []byte) (*types.HTTPResponse, error) {
+func (p *HTTP2Parser) parseResponseDataFrame(connectionID string, header http2.FrameHeader, data []byte, packetInfo *types.PacketInfo) (*types.HTTPResponse, error) {
 	if header.StreamID == 0 {
 		return nil, errors.New("response DATA frame with stream ID 0")
 	}
@@ -747,6 +749,7 @@ func (p *HTTP2Parser) parseResponseDataFrame(connectionID string, header http2.F
 				StreamID:  &header.StreamID,
 				Complete:  endStream,
 				RawData:   data,
+				TCPTuple:  packetInfo.TCPTuple,
 			},
 		}
 		stream.Response = response

@@ -73,7 +73,11 @@ func main() {
 	}
 
 	http2ConnectionData := append(http2Preface, settingsFrame...)
-	err := ht.ProcessPacket("http2-session-1", http2ConnectionData, types.DirectionRequest)
+	err := ht.ProcessPacket("http2-session-1", &types.PacketInfo{
+		Data:      http2ConnectionData,
+		Direction: types.DirectionRequest,
+		TCPTuple:  &types.TCPTuple{},
+	})
 	if err != nil {
 		log.Printf("处理HTTP/2会话数据失败: %v", err)
 	}
@@ -91,7 +95,11 @@ func main() {
 		0x07, ':', 's', 'c', 'h', 'e', 'm', 'e', 0x05, 'h', 't', 't', 'p', 's',
 	}
 
-	err = ht.ProcessPacket("http2-session-1", headersFrame, types.DirectionRequest)
+	err = ht.ProcessPacket("http2-session-1", &types.PacketInfo{
+		Data:      headersFrame,
+		Direction: types.DirectionRequest,
+		TCPTuple:  &types.TCPTuple{},
+	})
 	if err != nil {
 		log.Printf("处理HTTP/2请求失败: %v", err)
 	}
@@ -119,7 +127,11 @@ func main() {
 	}
 
 	responseData := append(responseHeadersFrame, dataFrame...)
-	err = ht.ProcessPacket("http2-session-1", responseData, types.DirectionResponse)
+	err = ht.ProcessPacket("http2-session-1", &types.PacketInfo{
+		Data:      responseData,
+		Direction: types.DirectionResponse,
+		TCPTuple:  &types.TCPTuple{},
+	})
 	if err != nil {
 		log.Printf("处理HTTP/2响应失败: %v", err)
 	}
@@ -139,7 +151,11 @@ func main() {
 					"Connection: keep-alive\r\n"+
 					"\r\n", num)
 
-			err := ht.ProcessPacket(id, []byte(request), types.DirectionRequest)
+			err := ht.ProcessPacket(id, &types.PacketInfo{
+			Data:      []byte(request),
+			Direction: types.DirectionRequest,
+			TCPTuple:  &types.TCPTuple{},
+		})
 			if err != nil {
 				log.Printf("处理并发请求%d失败: %v", num, err)
 			}
@@ -155,7 +171,11 @@ func main() {
 					"\r\n"+
 					`{"id":%d,"data":"resource-%d"}`, 25+num, num, num)
 
-			err = ht.ProcessPacket(id, []byte(response), types.DirectionResponse)
+			err = ht.ProcessPacket(id, &types.PacketInfo{
+			Data:      []byte(response),
+			Direction: types.DirectionResponse,
+			TCPTuple:  &types.TCPTuple{},
+		})
 			if err != nil {
 				log.Printf("处理并发响应%d失败: %v", num, err)
 			}
@@ -180,7 +200,11 @@ func main() {
 			"0\r\n" +
 			"\r\n")
 
-	err = ht.ProcessPacket("upload-session", chunkedRequest, types.DirectionRequest)
+	err = ht.ProcessPacket("upload-session", &types.PacketInfo{
+		Data:      chunkedRequest,
+		Direction: types.DirectionRequest,
+		TCPTuple:  &types.TCPTuple{},
+	})
 	if err != nil {
 		log.Printf("处理分块请求失败: %v", err)
 	}
@@ -195,7 +219,11 @@ func main() {
 			"0\r\n" +
 			"\r\n")
 
-	err = ht.ProcessPacket("upload-session", chunkedResponse, types.DirectionResponse)
+	err = ht.ProcessPacket("upload-session", &types.PacketInfo{
+		Data:      chunkedResponse,
+		Direction: types.DirectionResponse,
+		TCPTuple:  &types.TCPTuple{},
+	})
 	if err != nil {
 		log.Printf("处理分块响应失败: %v", err)
 	}
@@ -207,21 +235,33 @@ func main() {
 	fmt.Println("\n=== 示例6: 错误处理 ===")
 	// 发送格式错误的HTTP请求
 	malformedRequest := []byte("INVALID HTTP REQUEST\r\n\r\n")
-	err = ht.ProcessPacket("error-conn", malformedRequest, types.DirectionRequest)
+	err = ht.ProcessPacket("error-conn", &types.PacketInfo{
+		Data:      malformedRequest,
+		Direction: types.DirectionRequest,
+		TCPTuple:  &types.TCPTuple{},
+	})
 	if err != nil {
 		fmt.Printf("预期的错误: %v\n", err)
 	}
 
 	// 发送不完整的请求
 	incompleteRequest := []byte("GET /test HTTP/1.1\r\nHost: test.com\r\n")
-	err = ht.ProcessPacket("incomplete-conn", incompleteRequest, types.DirectionRequest)
+	err = ht.ProcessPacket("incomplete-conn", &types.PacketInfo{
+		Data:      incompleteRequest,
+		Direction: types.DirectionRequest,
+		TCPTuple:  &types.TCPTuple{},
+	})
 	if err != nil {
 		log.Printf("处理不完整请求: %v", err)
 	}
 
 	// 补全请求
 	completeRequest := []byte("User-Agent: Test\r\n\r\n")
-	err = ht.ProcessPacket("incomplete-conn", completeRequest, types.DirectionRequest)
+	err = ht.ProcessPacket("incomplete-conn", &types.PacketInfo{
+		Data:      completeRequest,
+		Direction: types.DirectionRequest,
+		TCPTuple:  &types.TCPTuple{},
+	})
 	if err != nil {
 		log.Printf("补全请求失败: %v", err)
 	}

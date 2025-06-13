@@ -30,7 +30,7 @@ func NewHTTP1ParserWithVersion(version types.HTTPVersion) *HTTP1Parser {
 }
 
 // ParseRequest 解析HTTP请求
-func (p *HTTP1Parser) ParseRequest(connectionID string, data []byte) ([]*types.HTTPRequest, error) {
+func (p *HTTP1Parser) ParseRequest(connectionID string, data []byte, packetInfo *types.PacketInfo) ([]*types.HTTPRequest, error) {
 	if len(data) == 0 {
 		return nil, errors.New("empty data")
 	}
@@ -133,6 +133,7 @@ func (p *HTTP1Parser) ParseRequest(connectionID string, data []byte) ([]*types.H
 			Timestamp:     time.Now(),
 			RawData:       make([]byte, len(data)),
 			Complete:      false,
+			TCPTuple:      packetInfo.TCPTuple,
 		},
 		Method: method,
 		URL:    parsedURL,
@@ -148,7 +149,7 @@ func (p *HTTP1Parser) ParseRequest(connectionID string, data []byte) ([]*types.H
 }
 
 // ParseResponse 解析HTTP响应
-func (p *HTTP1Parser) ParseResponse(connectionID string, data []byte) ([]*types.HTTPResponse, error) {
+func (p *HTTP1Parser) ParseResponse(connectionID string, data []byte, packetInfo *types.PacketInfo) ([]*types.HTTPResponse, error) {
 	if len(data) == 0 {
 		return nil, errors.New("empty data")
 	}
@@ -249,6 +250,7 @@ func (p *HTTP1Parser) ParseResponse(connectionID string, data []byte) ([]*types.
 			Timestamp:     time.Now(),
 			RawData:       make([]byte, len(data)),
 			Complete:      false,
+			TCPTuple:      packetInfo.TCPTuple,
 		},
 		StatusCode:       statusCode,
 		Status:           status,

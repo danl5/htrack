@@ -130,7 +130,11 @@ func TestHTrackProcessPacket(t *testing.T) {
 			direction = types.DirectionResponse
 		}
 
-		err := hTrack.ProcessPacket(packet.connectionID, packet.data, direction)
+		err := hTrack.ProcessPacket(packet.connectionID, &types.PacketInfo{
+			Data:      packet.data,
+			Direction: direction,
+			TCPTuple:  &types.TCPTuple{},
+		})
 		if err != nil {
 			fmt.Printf("❌ 数据包解析错误: %v\n", err)
 			continue

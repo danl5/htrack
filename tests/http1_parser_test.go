@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/danl5/htrack/parser"
+	"github.com/danl5/htrack/types"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -11,7 +12,11 @@ func TestParseHTTPRequest_SimpleGET(t *testing.T) {
 	p := parser.NewHTTP1Parser()
 	rawData := []byte("GET /test HTTP/1.1\r\nHost: example.com\r\nUser-Agent: test-agent\r\n\r\n")
 
-	reqs, err := p.ParseRequest("test-session-1", rawData)
+	reqs, err := p.ParseRequest("test-session-1", rawData, &types.PacketInfo{
+		Data:      rawData,
+		Direction: types.DirectionRequest,
+		TCPTuple:  &types.TCPTuple{},
+	})
 
 	assert.NoError(t, err)
 	assert.NotEmpty(t, reqs)
@@ -29,7 +34,11 @@ func TestParseHTTPResponse_SimpleOK(t *testing.T) {
 	p := parser.NewHTTP1Parser()
 	rawData := []byte("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 12\r\n\r\nHello, world")
 
-	resps, err := p.ParseResponse("test-session-1", rawData)
+	resps, err := p.ParseResponse("test-session-1", rawData, &types.PacketInfo{
+		Data:      rawData,
+		Direction: types.DirectionResponse,
+		TCPTuple:  &types.TCPTuple{},
+	})
 
 	assert.NoError(t, err)
 	assert.NotEmpty(t, resps)
@@ -48,7 +57,11 @@ func TestParseHTTPRequest_POSTWithBody(t *testing.T) {
 	p := parser.NewHTTP1Parser()
 	rawData := []byte("POST /submit HTTP/1.1\r\nHost: example.com\r\nContent-Type: application/json\r\nContent-Length: 15\r\n\r\n{\"key\":\"value\"}")
 
-	reqs, err := p.ParseRequest("test-session-1", rawData)
+	reqs, err := p.ParseRequest("test-session-1", rawData, &types.PacketInfo{
+		Data:      rawData,
+		Direction: types.DirectionRequest,
+		TCPTuple:  &types.TCPTuple{},
+	})
 
 	assert.NoError(t, err)
 	assert.NotEmpty(t, reqs)
@@ -67,7 +80,11 @@ func TestParseHTTPRequest_Chunked(t *testing.T) {
 	fullData := []byte("POST /chunked HTTP/1.1\r\nHost: example.com\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nWiki\r\n5\r\npedia\r\nE\r\n in\r\n\r\nchunks.\r\n0\r\n\r\n")
 
 	// 测试完整数据
-	reqs, err := p.ParseRequest("test-session-1", fullData)
+	reqs, err := p.ParseRequest("test-session-1", fullData, &types.PacketInfo{
+		Data:      fullData,
+		Direction: types.DirectionRequest,
+		TCPTuple:  &types.TCPTuple{},
+	})
 	assert.NoError(t, err)
 	assert.NotEmpty(t, reqs)
 	req := reqs[0]

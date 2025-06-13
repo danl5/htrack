@@ -14,8 +14,8 @@ import (
 
 // Parser HTTP解析器接口
 type Parser interface {
-	ParseRequest(connectionID string, data []byte) ([]*types.HTTPRequest, error)
-	ParseResponse(connectionID string, data []byte) ([]*types.HTTPResponse, error)
+	ParseRequest(connectionID string, data []byte, packetInfo *types.PacketInfo) ([]*types.HTTPRequest, error)
+	ParseResponse(connectionID string, data []byte, packetInfo *types.PacketInfo) ([]*types.HTTPResponse, error)
 	DetectVersion(data []byte) types.HTTPVersion
 	IsComplete(data []byte) bool
 	GetRequiredBytes(data []byte) int
@@ -57,7 +57,7 @@ func (pp *PacketProcessor) RegisterParser(version types.HTTPVersion, parser Pars
 }
 
 // ProcessPacket 处理数据包
-func (pp *PacketProcessor) ProcessPacket(connectionID string, data []byte, sequenceNum uint64, direction types.Direction) (*ProcessResult, error) {
+func (pp *PacketProcessor) ProcessPacket(connectionID string, data []byte, sequenceNum uint64, direction types.Direction, packetInfo *types.PacketInfo) (*ProcessResult, error) {
 	// 获取或创建缓冲区
 	buffer := pp.getOrCreateBuffer(connectionID)
 
@@ -111,7 +111,7 @@ func (pp *PacketProcessor) ProcessPacket(connectionID string, data []byte, seque
 
 	if direction == types.DirectionClientToServer || direction == types.DirectionRequest {
 		// 解析请求
-		reqs, err := parser.ParseRequest(connectionID, targetData)
+		reqs, err := parser.ParseRequest(connectionID, targetData, packetInfo)
 		if err != nil {
 			return nil, err
 		}
@@ -120,7 +120,7 @@ func (pp *PacketProcessor) ProcessPacket(connectionID string, data []byte, seque
 		}
 	} else {
 		// 解析响应
-		resps, err := parser.ParseResponse(connectionID, targetData)
+		resps, err := parser.ParseResponse(connectionID, targetData, packetInfo)
 		if err != nil {
 			return nil, err
 		}

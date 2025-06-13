@@ -20,7 +20,11 @@ func TestHTTP2StreamLifecycle(t *testing.T) {
 			"accept":     "text/html,application/xhtml+xml",
 		}
 		headersFrame := createHeadersFrameWithStreamID(t, 1, true, true, customHeaders)
-		reqs, err := parser.ParseRequest("test-conn", headersFrame)
+		reqs, err := parser.ParseRequest("test-conn", headersFrame, &types.PacketInfo{
+			Data:      headersFrame,
+			Direction: types.DirectionRequest,
+			TCPTuple:  &types.TCPTuple{},
+		})
 		if err != nil {
 			t.Fatalf("解析HEADERS帧失败: %v", err)
 		}
@@ -47,14 +51,22 @@ func TestHTTP2StreamLifecycle(t *testing.T) {
 			"x-request-id": "test-123",
 		}
 		headersFrame := createHeadersFrameWithStreamID(t, 3, false, true, customHeaders)
-		_, err := parser.ParseRequest("test-conn", headersFrame)
+		_, err := parser.ParseRequest("test-conn", headersFrame, &types.PacketInfo{
+			Data:      headersFrame,
+			Direction: types.DirectionRequest,
+			TCPTuple:  &types.TCPTuple{},
+		})
 		if err != nil {
 			t.Fatalf("解析HEADERS帧失败: %v", err)
 		}
 
 		// 然后发送DATA帧
 		dataFrame := createDataFrameWithStreamID(t, 3, []byte("Hello, HTTP/2!"), true)
-		reqs, err := parser.ParseRequest("test-conn", dataFrame)
+		reqs, err := parser.ParseRequest("test-conn", dataFrame, &types.PacketInfo{
+			Data:      dataFrame,
+			Direction: types.DirectionRequest,
+			TCPTuple:  &types.TCPTuple{},
+		})
 		if err != nil {
 			t.Fatalf("解析DATA帧失败: %v", err)
 		}
@@ -77,7 +89,11 @@ func TestHTTP2StreamLifecycle(t *testing.T) {
 			"connection": "close",
 		}
 		headersFrame := createHeadersFrameWithStreamID(t, 5, true, true, customHeaders)
-		reqs, err := parser.ParseRequest("test-conn", headersFrame)
+		reqs, err := parser.ParseRequest("test-conn", headersFrame, &types.PacketInfo{
+			Data:      headersFrame,
+			Direction: types.DirectionRequest,
+			TCPTuple:  &types.TCPTuple{},
+		})
 		if err != nil {
 			t.Fatalf("解析HEADERS帧失败: %v", err)
 		}
@@ -104,7 +120,11 @@ func TestHTTP2MultipleStreams(t *testing.T) {
 			"accept-encoding": "gzip, deflate",
 		}
 		headersFrame := createHeadersFrameWithStreamID(t, streamID, false, true, customHeaders)
-		reqs, err := parser.ParseRequest("test-conn", headersFrame)
+		reqs, err := parser.ParseRequest("test-conn", headersFrame, &types.PacketInfo{
+			Data:      headersFrame,
+			Direction: types.DirectionRequest,
+			TCPTuple:  &types.TCPTuple{},
+		})
 		if err != nil {
 			t.Fatalf("解析流%d的HEADERS帧失败: %v", streamID, err)
 		}
@@ -118,7 +138,11 @@ func TestHTTP2MultipleStreams(t *testing.T) {
 	for _, streamID := range streamIDs {
 		data := []byte(fmt.Sprintf("Data for stream %d", streamID))
 		dataFrame := createDataFrameWithStreamID(t, streamID, data, true)
-		reqs, err := parser.ParseRequest("test-conn", dataFrame)
+		reqs, err := parser.ParseRequest("test-conn", dataFrame, &types.PacketInfo{
+			Data:      dataFrame,
+			Direction: types.DirectionRequest,
+			TCPTuple:  &types.TCPTuple{},
+		})
 		if err != nil {
 			t.Fatalf("解析流%d的DATA帧失败: %v", streamID, err)
 		}
@@ -144,7 +168,11 @@ func TestHTTP2StreamPriority(t *testing.T) {
 
 	// 创建带优先级的HEADERS帧（不带END_STREAM标志）
 	headersFrame := createHeadersFrameWithPriority(t, 1, 0, 100, false)
-	reqs, err := parser.ParseRequest("test-conn", headersFrame)
+	reqs, err := parser.ParseRequest("test-conn", headersFrame, &types.PacketInfo{
+		Data:      headersFrame,
+		Direction: types.DirectionRequest,
+		TCPTuple:  &types.TCPTuple{},
+	})
 	if err != nil {
 		t.Fatalf("解析带优先级的HEADERS帧失败: %v", err)
 	}
@@ -156,7 +184,11 @@ func TestHTTP2StreamPriority(t *testing.T) {
 	// 发送DATA帧完成请求
 	data := []byte("test data")
 	dataFrame := createDataFrameWithStreamID(t, 1, data, true)
-	reqs, err = parser.ParseRequest("test-conn", dataFrame)
+	reqs, err = parser.ParseRequest("test-conn", dataFrame, &types.PacketInfo{
+		Data:      dataFrame,
+		Direction: types.DirectionRequest,
+		TCPTuple:  &types.TCPTuple{},
+	})
 	if err != nil {
 		t.Fatalf("解析DATA帧失败: %v", err)
 	}
@@ -189,7 +221,11 @@ func TestHTTP2StreamErrors(t *testing.T) {
 	t.Run("InvalidStreamID", func(t *testing.T) {
 		customHeaders := map[string]string{"test-header": "test-value"}
 		headersFrame := createHeadersFrameWithStreamID(t, 2, true, true, customHeaders) // 偶数流ID无效
-		_, err := parser.ParseRequest("test-conn", headersFrame)
+		_, err := parser.ParseRequest("test-conn", headersFrame, &types.PacketInfo{
+			Data:      headersFrame,
+			Direction: types.DirectionRequest,
+			TCPTuple:  &types.TCPTuple{},
+		})
 		if err == nil {
 			// 如果解析器当前不验证流ID，我们跳过这个测试而不是失败
 			t.Skip("解析器当前不验证偶数流ID，跳过此测试")
@@ -199,7 +235,11 @@ func TestHTTP2StreamErrors(t *testing.T) {
 	// 测试无效的填充
 	t.Run("InvalidPadding", func(t *testing.T) {
 		invalidFrame := createInvalidPaddedHeadersFrame(t, 1)
-		_, err := parser.ParseRequest("test-conn", invalidFrame)
+		_, err := parser.ParseRequest("test-conn", invalidFrame, &types.PacketInfo{
+			Data:      invalidFrame,
+			Direction: types.DirectionRequest,
+			TCPTuple:  &types.TCPTuple{},
+		})
 		if err == nil {
 			t.Error("期望解析无效填充帧失败，但成功了")
 		}
@@ -208,7 +248,11 @@ func TestHTTP2StreamErrors(t *testing.T) {
 	// 测试DATA帧的流ID为0
 	t.Run("DataFrameStreamIDZero", func(t *testing.T) {
 		dataFrame := createDataFrameWithStreamID(t, 0, []byte("test"), true)
-		_, err := parser.ParseRequest("test-conn", dataFrame)
+		_, err := parser.ParseRequest("test-conn", dataFrame, &types.PacketInfo{
+			Data:      dataFrame,
+			Direction: types.DirectionRequest,
+			TCPTuple:  &types.TCPTuple{},
+		})
 		if err == nil {
 			t.Error("期望DATA帧流ID为0时失败，但成功了")
 		}
@@ -228,7 +272,11 @@ func TestHTTP2StreamContinuation(t *testing.T) {
 	continuationFrame := createContinuationFrame(t, 1, true)
 
 	// 解析HEADERS帧（不带END_HEADERS标志）
-	reqs, err := parser.ParseRequest("test-conn", headersFrame)
+	reqs, err := parser.ParseRequest("test-conn", headersFrame, &types.PacketInfo{
+		Data:      headersFrame,
+		Direction: types.DirectionRequest,
+		TCPTuple:  &types.TCPTuple{},
+	})
 	if err != nil {
 		t.Skipf("解析HEADERS帧失败: %v，跳过CONTINUATION测试", err)
 		return
@@ -239,7 +287,11 @@ func TestHTTP2StreamContinuation(t *testing.T) {
 	}
 
 	// 解析CONTINUATION帧
-	reqs, err = parser.ParseRequest("test-conn", continuationFrame)
+	reqs, err = parser.ParseRequest("test-conn", continuationFrame, &types.PacketInfo{
+		Data:      continuationFrame,
+		Direction: types.DirectionRequest,
+		TCPTuple:  &types.TCPTuple{},
+	})
 	if err != nil {
 		t.Skipf("解析CONTINUATION帧失败: %v，可能解析器不支持", err)
 		return
@@ -252,7 +304,11 @@ func TestHTTP2StreamContinuation(t *testing.T) {
 	// 发送DATA帧完成请求
 	data := []byte("test data")
 	dataFrame := createDataFrameWithStreamID(t, 1, data, true)
-	reqs, err = parser.ParseRequest("test-conn", dataFrame)
+	reqs, err = parser.ParseRequest("test-conn", dataFrame, &types.PacketInfo{
+		Data:      dataFrame,
+		Direction: types.DirectionRequest,
+		TCPTuple:  &types.TCPTuple{},
+	})
 	if err != nil {
 		t.Fatalf("解析DATA帧失败: %v", err)
 	}
@@ -269,7 +325,11 @@ func TestHTTP2StreamResponse(t *testing.T) {
 
 	// 创建响应HEADERS帧（不带END_STREAM标志）
 	responseFrame := createResponseHeadersFrame(t, 1, 200)
-	resps, err := parser.ParseResponse("test-conn", responseFrame)
+	resps, err := parser.ParseResponse("test-conn", responseFrame, &types.PacketInfo{
+		Data:      responseFrame,
+		Direction: types.DirectionResponse,
+		TCPTuple:  &types.TCPTuple{},
+	})
 	if err != nil {
 		t.Skipf("解析响应HEADERS帧失败: %v，可能解析器不支持响应解析", err)
 		return
@@ -282,7 +342,11 @@ func TestHTTP2StreamResponse(t *testing.T) {
 	// 创建响应DATA帧（带END_STREAM标志）
 	responseData := []byte("Response body")
 	dataFrame := createDataFrameWithStreamID(t, 1, responseData, true)
-	resps, err = parser.ParseResponse("test-conn", dataFrame)
+	resps, err = parser.ParseResponse("test-conn", dataFrame, &types.PacketInfo{
+		Data:      dataFrame,
+		Direction: types.DirectionResponse,
+		TCPTuple:  &types.TCPTuple{},
+	})
 	if err != nil {
 		t.Fatalf("解析响应DATA帧失败: %v", err)
 	}
@@ -326,7 +390,11 @@ func TestHTTP2HeaderFragmentation(t *testing.T) {
 
 		// 创建第一个HEADERS帧（不带END_HEADERS标志）
 		headersFrame := createFragmentedHeadersFrame(t, 1, false, customHeaders)
-		reqs, err := parser.ParseRequest("test-conn", headersFrame)
+		reqs, err := parser.ParseRequest("test-conn", headersFrame, &types.PacketInfo{
+			Data:      headersFrame,
+			Direction: types.DirectionRequest,
+			TCPTuple:  &types.TCPTuple{},
+		})
 		if err != nil {
 			t.Logf("解析第一个HEADERS帧: %v", err)
 		}
@@ -337,7 +405,11 @@ func TestHTTP2HeaderFragmentation(t *testing.T) {
 
 		// 创建CONTINUATION帧完成头部
 		continuationFrame := createContinuationFrameWithRemainingHeaders(t, 1, true, customHeaders)
-		reqs, err = parser.ParseRequest("test-conn", continuationFrame)
+		reqs, err = parser.ParseRequest("test-conn", continuationFrame, &types.PacketInfo{
+			Data:      continuationFrame,
+			Direction: types.DirectionRequest,
+			TCPTuple:  &types.TCPTuple{},
+		})
 		if err != nil {
 			t.Skipf("解析CONTINUATION帧失败: %v，可能解析器不支持头部分片重组", err)
 			return
@@ -350,7 +422,11 @@ func TestHTTP2HeaderFragmentation(t *testing.T) {
 		// 发送DATA帧完成请求
 		data := []byte("test data")
 		dataFrame := createDataFrameWithStreamID(t, 1, data, true)
-		reqs, err = parser.ParseRequest("test-conn", dataFrame)
+		reqs, err = parser.ParseRequest("test-conn", dataFrame, &types.PacketInfo{
+			Data:      dataFrame,
+			Direction: types.DirectionRequest,
+			TCPTuple:  &types.TCPTuple{},
+		})
 		if err != nil {
 			t.Fatalf("解析DATA帧失败: %v", err)
 		}
@@ -399,7 +475,11 @@ func TestHTTP2SingleStreamDataFragmentation(t *testing.T) {
 			"content-world": "50",
 		}
 		headersFrame := createHeadersFrameWithStreamID(t, 1, false, true, customHeaders)
-		_, err := parser.ParseRequest("test-conn", headersFrame)
+		_, err := parser.ParseRequest("test-conn", headersFrame, &types.PacketInfo{
+			Data:      headersFrame,
+			Direction: types.DirectionRequest,
+			TCPTuple:  &types.TCPTuple{},
+		})
 		if err != nil {
 			t.Fatalf("解析HEADERS帧失败: %v", err)
 		}
@@ -411,21 +491,33 @@ func TestHTTP2SingleStreamDataFragmentation(t *testing.T) {
 
 		// 发送第一个DATA帧片段（不带END_STREAM）
 		dataFrame1 := createDataFrameWithStreamID(t, 1, fragment1, false)
-		_, err = parser.ParseRequest("test-conn", dataFrame1)
+		_, err = parser.ParseRequest("test-conn", dataFrame1, &types.PacketInfo{
+			Data:      dataFrame1,
+			Direction: types.DirectionRequest,
+			TCPTuple:  &types.TCPTuple{},
+		})
 		if err != nil {
 			t.Fatalf("解析第一个DATA帧失败: %v", err)
 		}
 
 		// 发送第二个DATA帧片段（不带END_STREAM）
 		dataFrame2 := createDataFrameWithStreamID(t, 1, fragment2, false)
-		_, err = parser.ParseRequest("test-conn", dataFrame2)
+		_, err = parser.ParseRequest("test-conn", dataFrame2, &types.PacketInfo{
+			Data:      dataFrame2,
+			Direction: types.DirectionRequest,
+			TCPTuple:  &types.TCPTuple{},
+		})
 		if err != nil {
 			t.Fatalf("解析第二个DATA帧失败: %v", err)
 		}
 
 		// 发送最后一个DATA帧片段（带END_STREAM）
 		dataFrame3 := createDataFrameWithStreamID(t, 1, fragment3, true)
-		reqs3, err := parser.ParseRequest("test-conn", dataFrame3)
+		reqs3, err := parser.ParseRequest("test-conn", dataFrame3, &types.PacketInfo{
+			Data:      dataFrame3,
+			Direction: types.DirectionRequest,
+			TCPTuple:  &types.TCPTuple{},
+		})
 		if err != nil {
 			t.Fatalf("解析第三个DATA帧失败: %v", err)
 		}
@@ -473,7 +565,11 @@ func TestHTTP2ConcurrentStreamDataFragmentation(t *testing.T) {
 				"content-type": "text/plain",
 			}
 			headersFrame := createHeadersFrameWithStreamID(t, streamID, false, true, customHeaders)
-			_, err := parser.ParseRequest("test-conn", headersFrame)
+			_, err := parser.ParseRequest("test-conn", headersFrame, &types.PacketInfo{
+				Data:      headersFrame,
+				Direction: types.DirectionRequest,
+				TCPTuple:  &types.TCPTuple{},
+			})
 			if err != nil {
 				t.Fatalf("解析流%d的HEADERS帧失败: %v", streamID, err)
 			}
@@ -486,7 +582,11 @@ func TestHTTP2ConcurrentStreamDataFragmentation(t *testing.T) {
 				isLast := i == len(fragments)-1
 				if i < len(fragments) {
 					dataFrame := createDataFrameWithStreamID(t, streamID, []byte(fragments[i]), isLast)
-					reqs, err := parser.ParseRequest("test-conn", dataFrame)
+					reqs, err := parser.ParseRequest("test-conn", dataFrame, &types.PacketInfo{
+						Data:      dataFrame,
+						Direction: types.DirectionRequest,
+						TCPTuple:  &types.TCPTuple{},
+					})
 					if err != nil {
 						t.Fatalf("解析流%d第%d个DATA帧失败: %v", streamID, i+1, err)
 					}
@@ -527,7 +627,11 @@ func BenchmarkHTTP2StreamProcessing(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_, err := parser.ParseRequest("test-conn", headersFrame)
+		_, err := parser.ParseRequest("test-conn", headersFrame, &types.PacketInfo{
+			Data:      headersFrame,
+			Direction: types.DirectionRequest,
+			TCPTuple:  &types.TCPTuple{},
+		})
 		if err != nil {
 			b.Fatalf("解析失败: %v", err)
 		}
@@ -548,7 +652,11 @@ func TestHTTP2ConsecutiveRequestResponse(t *testing.T) {
 			"x-request-id": "req-001",
 		}
 		firstHeadersFrame := createHeadersFrameWithStreamID(t, 1, false, true, firstReqHeaders)
-		reqs1, err := parser.ParseRequest("test-conn", firstHeadersFrame)
+		reqs1, err := parser.ParseRequest("test-conn", firstHeadersFrame, &types.PacketInfo{
+			Data:      firstHeadersFrame,
+			Direction: types.DirectionRequest,
+			TCPTuple:  &types.TCPTuple{},
+		})
 		if err != nil {
 			t.Fatalf("解析第一个请求HEADERS帧失败: %v", err)
 		}
@@ -560,7 +668,11 @@ func TestHTTP2ConsecutiveRequestResponse(t *testing.T) {
 		// 第一个请求的DATA帧
 		firstReqData := []byte(`{"message": "first request"}`)
 		firstDataFrame := createDataFrameWithStreamID(t, 1, firstReqData, true)
-		reqs1Data, err := parser.ParseRequest("test-conn", firstDataFrame)
+		reqs1Data, err := parser.ParseRequest("test-conn", firstDataFrame, &types.PacketInfo{
+			Data:      firstDataFrame,
+			Direction: types.DirectionRequest,
+			TCPTuple:  &types.TCPTuple{},
+		})
 		if err != nil {
 			t.Fatalf("解析第一个请求DATA帧失败: %v", err)
 		}
@@ -573,7 +685,11 @@ func TestHTTP2ConsecutiveRequestResponse(t *testing.T) {
 		// 第一个响应 (Stream ID: 1)
 		// 创建第一个响应的HEADERS帧
 		firstRespFrame := createResponseHeadersFrame(t, 1, 200)
-		resps1, err := parser.ParseResponse("test-conn", firstRespFrame)
+		resps1, err := parser.ParseResponse("test-conn", firstRespFrame, &types.PacketInfo{
+			Data:      firstRespFrame,
+			Direction: types.DirectionResponse,
+			TCPTuple:  &types.TCPTuple{},
+		})
 		if err != nil {
 			t.Skipf("解析第一个响应HEADERS帧失败: %v，可能解析器不支持响应解析", err)
 			return
@@ -586,7 +702,11 @@ func TestHTTP2ConsecutiveRequestResponse(t *testing.T) {
 		// 第一个响应的DATA帧
 		firstRespData := []byte(`{"result": "first response"}`)
 		firstRespDataFrame := createDataFrameWithStreamID(t, 1, firstRespData, true)
-		resps1Data, err := parser.ParseResponse("test-conn", firstRespDataFrame)
+		resps1Data, err := parser.ParseResponse("test-conn", firstRespDataFrame, &types.PacketInfo{
+			Data:      firstRespDataFrame,
+			Direction: types.DirectionResponse,
+			TCPTuple:  &types.TCPTuple{},
+		})
 		if err != nil {
 			t.Fatalf("解析第一个响应DATA帧失败: %v", err)
 		}
@@ -604,7 +724,11 @@ func TestHTTP2ConsecutiveRequestResponse(t *testing.T) {
 			"x-request-id": "req-002",
 		}
 		secondHeadersFrame := createHeadersFrameWithStreamID(t, 3, false, true, secondReqHeaders)
-		reqs2, err := parser.ParseRequest("test-conn", secondHeadersFrame)
+		reqs2, err := parser.ParseRequest("test-conn", secondHeadersFrame, &types.PacketInfo{
+			Data:      secondHeadersFrame,
+			Direction: types.DirectionRequest,
+			TCPTuple:  &types.TCPTuple{},
+		})
 		if err != nil {
 			t.Fatalf("解析第二个请求HEADERS帧失败: %v", err)
 		}
@@ -616,7 +740,11 @@ func TestHTTP2ConsecutiveRequestResponse(t *testing.T) {
 		// 第二个请求的DATA帧
 		secondReqData := []byte(`{"message": "second request"}`)
 		secondDataFrame := createDataFrameWithStreamID(t, 3, secondReqData, true)
-		reqs2Data, err := parser.ParseRequest("test-conn", secondDataFrame)
+		reqs2Data, err := parser.ParseRequest("test-conn", secondDataFrame, &types.PacketInfo{
+			Data:      secondDataFrame,
+			Direction: types.DirectionRequest,
+			TCPTuple:  &types.TCPTuple{},
+		})
 		if err != nil {
 			t.Fatalf("解析第二个请求DATA帧失败: %v", err)
 		}
@@ -629,7 +757,11 @@ func TestHTTP2ConsecutiveRequestResponse(t *testing.T) {
 		// 第二个响应 (Stream ID: 3)
 		// 创建第二个响应的HEADERS帧
 		secondRespFrame := createResponseHeadersFrame(t, 3, 201)
-		resps2, err := parser.ParseResponse("test-conn", secondRespFrame)
+		resps2, err := parser.ParseResponse("test-conn", secondRespFrame, &types.PacketInfo{
+			Data:      secondRespFrame,
+			Direction: types.DirectionResponse,
+			TCPTuple:  &types.TCPTuple{},
+		})
 		if err != nil {
 			t.Fatalf("解析第二个响应HEADERS帧失败: %v", err)
 		}
@@ -641,7 +773,11 @@ func TestHTTP2ConsecutiveRequestResponse(t *testing.T) {
 		// 第二个响应的DATA帧
 		secondRespData := []byte(`{"result": "second response"}`)
 		secondRespDataFrame := createDataFrameWithStreamID(t, 3, secondRespData, true)
-		resps2Data, err := parser.ParseResponse("test-conn", secondRespDataFrame)
+		resps2Data, err := parser.ParseResponse("test-conn", secondRespDataFrame, &types.PacketInfo{
+			Data:      secondRespDataFrame,
+			Direction: types.DirectionResponse,
+			TCPTuple:  &types.TCPTuple{},
+		})
 		if err != nil {
 			t.Fatalf("解析第二个响应DATA帧失败: %v", err)
 		}
@@ -671,10 +807,14 @@ func TestHTTP2ConsecutiveRequestResponse(t *testing.T) {
 		// 第一个请求开始
 		firstReqHeaders := map[string]string{
 			"content-type": "application/json",
-			"x-test-case": "interleaved",
+			"x-test-case":  "interleaved",
 		}
 		firstHeadersFrame := createHeadersFrameWithStreamID(t, 1, true, true, firstReqHeaders)
-		_, err := parser.ParseRequest("test-conn", firstHeadersFrame)
+		_, err := parser.ParseRequest("test-conn", firstHeadersFrame, &types.PacketInfo{
+			Data:      firstHeadersFrame,
+			Direction: types.DirectionRequest,
+			TCPTuple:  &types.TCPTuple{},
+		})
 		if err != nil {
 			t.Fatalf("解析第一个请求失败: %v", err)
 		}
@@ -682,17 +822,25 @@ func TestHTTP2ConsecutiveRequestResponse(t *testing.T) {
 		// 第二个请求开始（在第一个请求响应之前）
 		secondReqHeaders := map[string]string{
 			"content-type": "text/plain",
-			"x-test-case": "interleaved",
+			"x-test-case":  "interleaved",
 		}
 		secondHeadersFrame := createHeadersFrameWithStreamID(t, 3, true, true, secondReqHeaders)
-		_, err = parser.ParseRequest("test-conn", secondHeadersFrame)
+		_, err = parser.ParseRequest("test-conn", secondHeadersFrame, &types.PacketInfo{
+			Data:      secondHeadersFrame,
+			Direction: types.DirectionRequest,
+			TCPTuple:  &types.TCPTuple{},
+		})
 		if err != nil {
 			t.Fatalf("解析第二个请求失败: %v", err)
 		}
 
 		// 第一个请求的响应
 		firstRespFrame := createResponseHeadersFrame(t, 1, 200)
-		resps1, err := parser.ParseResponse("test-conn", firstRespFrame)
+		resps1, err := parser.ParseResponse("test-conn", firstRespFrame, &types.PacketInfo{
+			Data:      firstRespFrame,
+			Direction: types.DirectionResponse,
+			TCPTuple:  &types.TCPTuple{},
+		})
 		if err != nil {
 			t.Skipf("解析第一个响应失败: %v，可能解析器不支持响应解析", err)
 			return
@@ -700,7 +848,11 @@ func TestHTTP2ConsecutiveRequestResponse(t *testing.T) {
 
 		// 第二个请求的响应
 		secondRespFrame := createResponseHeadersFrame(t, 3, 404)
-		resps2, err := parser.ParseResponse("test-conn", secondRespFrame)
+		resps2, err := parser.ParseResponse("test-conn", secondRespFrame, &types.PacketInfo{
+			Data:      secondRespFrame,
+			Direction: types.DirectionResponse,
+			TCPTuple:  &types.TCPTuple{},
+		})
 		if err != nil {
 			t.Fatalf("解析第二个响应失败: %v", err)
 		}
@@ -733,7 +885,11 @@ func BenchmarkHTTP2MultipleStreams(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		for _, frame := range frames {
-			_, err := parser.ParseRequest("test-conn", frame)
+			_, err := parser.ParseRequest("test-conn", frame, &types.PacketInfo{
+				Data:      frame,
+				Direction: types.DirectionRequest,
+				TCPTuple:  &types.TCPTuple{},
+			})
 			if err != nil {
 				b.Fatalf("解析失败: %v", err)
 			}

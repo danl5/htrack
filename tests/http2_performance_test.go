@@ -28,7 +28,11 @@ func TestLargeDataFrameProcessing(t *testing.T) {
 			streamID := uint32(i + 1)
 			// 创建HEADERS帧（不带END_STREAM），然后创建DATA帧（带END_STREAM）
 			headersFrame := createLargeHeadersFrame(t, streamID, false, true)
-			_, err := parser.ParseRequest(connID, headersFrame)
+			_, err := parser.ParseRequest(connID, headersFrame, &types.PacketInfo{
+				Data:      headersFrame,
+				Direction: types.DirectionRequest,
+				TCPTuple:  &types.TCPTuple{},
+			})
 			if err != nil {
 				t.Fatalf("解析HEADERS帧失败: %v", err)
 			}
@@ -36,7 +40,11 @@ func TestLargeDataFrameProcessing(t *testing.T) {
 			// 创建大数据帧测试数据处理性能
 			dataFrame := createLargeDataFrame(t, streamID, size, true)
 			start := time.Now()
-			reqs, err := parser.ParseRequest(connID, dataFrame)
+			reqs, err := parser.ParseRequest(connID, dataFrame, &types.PacketInfo{
+				Data:      dataFrame,
+				Direction: types.DirectionRequest,
+				TCPTuple:  &types.TCPTuple{},
+			})
 			duration := time.Since(start)
 			if err != nil {
 				t.Fatalf("解析大数据帧失败 (size=%d): %v", size, err)
@@ -67,7 +75,11 @@ func TestFragmentedFrameReassembly(t *testing.T) {
 		continuationFrames := createMultipleContinuationFrames(t, 1, 5) // 5个CONTINUATION帧
 
 		// 解析初始HEADERS帧
-		reqs, err := parser.ParseRequest(connID, headersFrame)
+		reqs, err := parser.ParseRequest(connID, headersFrame, &types.PacketInfo{
+			Data:      headersFrame,
+			Direction: types.DirectionRequest,
+			TCPTuple:  &types.TCPTuple{},
+		})
 		if err != nil {
 			t.Fatalf("解析分片HEADERS帧失败: %v", err)
 		}
@@ -78,7 +90,11 @@ func TestFragmentedFrameReassembly(t *testing.T) {
 
 		// 逐个解析CONTINUATION帧
 		for i, contFrame := range continuationFrames {
-			reqs, err = parser.ParseRequest(connID, contFrame)
+			reqs, err = parser.ParseRequest(connID, contFrame, &types.PacketInfo{
+				Data:      contFrame,
+				Direction: types.DirectionRequest,
+				TCPTuple:  &types.TCPTuple{},
+			})
 			if err != nil {
 				t.Fatalf("解析CONTINUATION帧 %d 失败: %v", i, err)
 			}
@@ -91,7 +107,11 @@ func TestFragmentedFrameReassembly(t *testing.T) {
 		// 发送DATA帧完成请求
 		data := []byte("test data")
 		dataFrame := createDataFrameWithStreamID(t, 1, data, true)
-		reqs, err = parser.ParseRequest(connID, dataFrame)
+		reqs, err = parser.ParseRequest(connID, dataFrame, &types.PacketInfo{
+			Data:      dataFrame,
+			Direction: types.DirectionRequest,
+			TCPTuple:  &types.TCPTuple{},
+		})
 		if err != nil {
 			t.Fatalf("解析DATA帧失败: %v", err)
 		}
@@ -108,7 +128,11 @@ func TestFragmentedFrameReassembly(t *testing.T) {
 	t.Run("DataFragmentation", func(t *testing.T) {
 		// 先建立流（不带END_STREAM标志）
 		headersFrame := createLargeHeadersFrame(t, 3, false, true)
-		reqs, err := parser.ParseRequest(connID, headersFrame)
+		reqs, err := parser.ParseRequest(connID, headersFrame, &types.PacketInfo{
+			Data:      headersFrame,
+			Direction: types.DirectionRequest,
+			TCPTuple:  &types.TCPTuple{},
+		})
 		if err != nil {
 			t.Fatalf("建立流失败: %v", err)
 		}
@@ -129,7 +153,11 @@ func TestFragmentedFrameReassembly(t *testing.T) {
 				fragment[4] |= 0x01
 			}
 
-			reqs, err := parser.ParseRequest(connID, fragment)
+			reqs, err := parser.ParseRequest(connID, fragment, &types.PacketInfo{
+				Data:      fragment,
+				Direction: types.DirectionRequest,
+				TCPTuple:  &types.TCPTuple{},
+			})
 			if err != nil {
 				t.Fatalf("解析DATA片段 %d 失败: %v", i, err)
 			}
@@ -183,7 +211,11 @@ func TestConcurrentStreamProcessing(t *testing.T) {
 
 				// 创建HEADERS帧
 				headersFrame := createConcurrentTestFrame(t, streamID, true, true, goroutineID, i)
-				reqs, err := sharedParser.ParseRequest(connID, headersFrame)
+				reqs, err := sharedParser.ParseRequest(connID, headersFrame, &types.PacketInfo{
+					Data:      headersFrame,
+					Direction: types.DirectionRequest,
+					TCPTuple:  &types.TCPTuple{},
+				})
 				if err != nil {
 					errorChan <- fmt.Errorf("goroutine %d, stream %d: %v", goroutineID, streamID, err)
 					return
@@ -257,14 +289,22 @@ func TestMemoryUsageUnderLoad(t *testing.T) {
 
 		// 创建HEADERS帧
 		headersFrame := createLargeHeadersFrame(t, streamID, false, true)
-		_, err := parser.ParseRequest(connID, headersFrame)
+		_, err := parser.ParseRequest(connID, headersFrame, &types.PacketInfo{
+			Data:      headersFrame,
+			Direction: types.DirectionRequest,
+			TCPTuple:  &types.TCPTuple{},
+		})
 		if err != nil {
 			t.Fatalf("流 %d HEADERS解析失败: %v", streamID, err)
 		}
 
 		// 创建DATA帧
 		dataFrame := createLargeDataFrame(t, streamID, dataSize, true)
-		_, err = parser.ParseResponse(connID, dataFrame)
+		_, err = parser.ParseResponse(connID, dataFrame, &types.PacketInfo{
+			Data:      dataFrame,
+			Direction: types.DirectionResponse,
+			TCPTuple:  &types.TCPTuple{},
+		})
 		if err != nil {
 			t.Fatalf("流 %d DATA解析失败: %v", streamID, err)
 		}
@@ -314,11 +354,19 @@ func BenchmarkLargeFrameProcessing(b *testing.B) {
 			for i := 0; i < b.N; i++ {
 				// 每次迭代使用新的连接ID避免状态干扰
 				connID := fmt.Sprintf("bench-%d", i)
-				_, err := parser.ParseRequest(connID, headersFrame)
+				_, err := parser.ParseRequest(connID, headersFrame, &types.PacketInfo{
+				Data:      headersFrame,
+				Direction: types.DirectionRequest,
+				TCPTuple:  &types.TCPTuple{},
+			})
 				if err != nil {
 					b.Fatal(err)
 				}
-				_, err = parser.ParseResponse(connID, dataFrame)
+				_, err = parser.ParseResponse(connID, dataFrame, &types.PacketInfo{
+				Data:      dataFrame,
+				Direction: types.DirectionResponse,
+				TCPTuple:  &types.TCPTuple{},
+			})
 				if err != nil {
 					b.Fatal(err)
 				}
@@ -343,7 +391,11 @@ func BenchmarkConcurrentProcessing(b *testing.B) {
 				i := 0
 				for pb.Next() {
 					connID := fmt.Sprintf("bench-concurrent-%d", i)
-					_, err := parser.ParseRequest(connID, headersFrame)
+					_, err := parser.ParseRequest(connID, headersFrame, &types.PacketInfo{
+					Data:      headersFrame,
+					Direction: types.DirectionRequest,
+					TCPTuple:  &types.TCPTuple{},
+				})
 					if err != nil {
 						b.Fatal(err)
 					}
@@ -371,14 +423,22 @@ func BenchmarkFrameReassembly(b *testing.B) {
 				connID := fmt.Sprintf("bench-reassembly-%d", i)
 
 				// 解析HEADERS帧
-				_, err := parser.ParseRequest(connID, headersFrame)
+				_, err := parser.ParseRequest(connID, headersFrame, &types.PacketInfo{
+				Data:      headersFrame,
+				Direction: types.DirectionRequest,
+				TCPTuple:  &types.TCPTuple{},
+			})
 				if err != nil {
 					b.Fatal(err)
 				}
 
 				// 解析CONTINUATION帧
 				for _, contFrame := range continuationFrames {
-					_, err := parser.ParseRequest(connID, contFrame)
+					_, err := parser.ParseRequest(connID, contFrame, &types.PacketInfo{
+					Data:      contFrame,
+					Direction: types.DirectionRequest,
+					TCPTuple:  &types.TCPTuple{},
+				})
 					if err != nil {
 						b.Fatal(err)
 					}

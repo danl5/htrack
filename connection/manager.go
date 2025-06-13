@@ -118,7 +118,7 @@ func NewManager(config *Config) *Manager {
 }
 
 // ProcessPacket 处理数据包
-func (m *Manager) ProcessPacket(connectionID string, data []byte, direction types.Direction) error {
+func (m *Manager) ProcessPacket(connectionID string, packetInfo *types.PacketInfo) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -127,20 +127,20 @@ func (m *Manager) ProcessPacket(connectionID string, data []byte, direction type
 	}
 
 	// 获取或创建连接
-	conn, err := m.getOrCreateConnection(connectionID, data)
+	conn, err := m.getOrCreateConnection(connectionID, packetInfo.Data)
 	if err != nil {
 		return err
 	}
 
 	// 更新活动时间
 	conn.LastActivity = time.Now()
-	conn.LastDirection = direction
+	conn.LastDirection = packetInfo.Direction
 
 	// 添加数据到缓冲区
-	conn.PacketBuffer.AddPacket(data, direction)
+	conn.PacketBuffer.AddPacket(packetInfo.Data, packetInfo.Direction)
 
 	// 尝试解析完整消息
-	return m.tryParseMessages(conn)
+	return m.tryParseMessages(conn, packetInfo)
 }
 
 // GetConnection 获取连接
@@ -385,7 +385,7 @@ func (m *Manager) DetectHTTPVersion(data []byte) types.HTTPVersion {
 }
 
 // tryParseMessages 尝试解析消息
-func (m *Manager) tryParseMessages(conn *Connection) error {
+func (m *Manager) tryParseMessages(conn *Connection, packetInfo *types.PacketInfo) error {
 	var data []byte
 
 	// 根据方向获取相应的数据
@@ -402,11 +402,11 @@ func (m *Manager) tryParseMessages(conn *Connection) error {
 		return nil
 	}
 
-	return m.tryParseHTTPMessages(conn, data)
+	return m.tryParseHTTPMessages(conn, data, packetInfo)
 }
 
 // tryParseHTTPMessages 尝试解析HTTP消息
-func (m *Manager) tryParseHTTPMessages(conn *Connection, data []byte) error {
+func (m *Manager) tryParseHTTPMessages(conn *Connection, data []byte, packetInfo *types.PacketInfo) error {
 	// 检查是否有完整消息或者数据看起来像HTTP但格式错误
 	isComplete := conn.Parser.IsComplete(data)
 
@@ -419,7 +419,7 @@ func (m *Manager) tryParseHTTPMessages(conn *Connection, data []byte) error {
 	// 对于HTTP/2，使用不同的完整性检查
 	if conn.Version == types.HTTP2 {
 		// HTTP/2数据总是尝试解析
-		return m.parseHTTP2Messages(conn, data)
+		return m.parseHTTP2Messages(conn, data, packetInfo)
 	}
 
 	if !isComplete && !looksLikeHTTP {
@@ -440,15 +440,15 @@ func (m *Manager) tryParseHTTPMessages(conn *Connection, data []byte) error {
 
 	// 根据方向尝试解析相应的消息类型
 	if conn.LastDirection == types.DirectionRequest {
-		return m.parseRequestMessage(conn, data, isComplete, looksLikeHTTP)
+		return m.parseRequestMessage(conn, data, isComplete, looksLikeHTTP, packetInfo)
 	} else if conn.LastDirection == types.DirectionResponse {
-		return m.parseResponseMessage(conn, data, isComplete, looksLikeHTTP)
+		return m.parseResponseMessage(conn, data, isComplete, looksLikeHTTP, packetInfo)
 	} else {
 		// 如果没有方向信息，尝试两种解析（向后兼容）
-		if err := m.parseRequestMessage(conn, data, isComplete, looksLikeHTTP); err == nil {
+		if err := m.parseRequestMessage(conn, data, isComplete, looksLikeHTTP, packetInfo); err == nil {
 			return nil
 		}
-		return m.parseResponseMessage(conn, data, isComplete, looksLikeHTTP)
+		return m.parseResponseMessage(conn, data, isComplete, looksLikeHTTP, packetInfo)
 	}
 }
 
@@ -467,7 +467,7 @@ func (m *Manager) looksLikeHTTPData(data []byte) bool {
 }
 
 // parseHTTP2Messages 解析HTTP/2消息 - 多帧处理
-func (m *Manager) parseHTTP2Messages(conn *Connection, data []byte) error {
+func (m *Manager) parseHTTP2Messages(conn *Connection, data []byte, packetInfo *types.PacketInfo) error {
 	// 获取HTTP/2解析器
 	http2Parser, ok := conn.Parser.(*parser.HTTP2Parser)
 	if !ok {
@@ -477,17 +477,17 @@ func (m *Manager) parseHTTP2Messages(conn *Connection, data []byte) error {
 	// 根据方向处理不同类型的消息
 	switch conn.LastDirection {
 	case types.DirectionRequest:
-		return m.parseHTTP2Requests(conn, http2Parser, data)
+		return m.parseHTTP2Requests(conn, http2Parser, data, packetInfo)
 	case types.DirectionResponse:
-		return m.parseHTTP2Responses(conn, http2Parser, data)
+		return m.parseHTTP2Responses(conn, http2Parser, data, packetInfo)
 	default:
 		return nil
 	}
 }
 
 // parseHTTP2Requests 解析HTTP/2请求帧
-func (m *Manager) parseHTTP2Requests(conn *Connection, parser *parser.HTTP2Parser, data []byte) error {
-	requests, err := parser.ParseRequest(conn.ID, data)
+func (m *Manager) parseHTTP2Requests(conn *Connection, parser *parser.HTTP2Parser, data []byte, packetInfo *types.PacketInfo) error {
+	requests, err := parser.ParseRequest(conn.ID, data, packetInfo)
 	if err != nil {
 		return m.handleHTTP2ParseError(err, data)
 	}
@@ -504,8 +504,8 @@ func (m *Manager) parseHTTP2Requests(conn *Connection, parser *parser.HTTP2Parse
 }
 
 // parseHTTP2Responses 解析HTTP/2响应帧
-func (m *Manager) parseHTTP2Responses(conn *Connection, parser *parser.HTTP2Parser, data []byte) error {
-	responses, err := parser.ParseResponse(conn.ID, data)
+func (m *Manager) parseHTTP2Responses(conn *Connection, parser *parser.HTTP2Parser, data []byte, packetInfo *types.PacketInfo) error {
+	responses, err := parser.ParseResponse(conn.ID, data, packetInfo)
 	if err != nil {
 		return m.handleHTTP2ParseError(err, data)
 	}
@@ -556,8 +556,8 @@ func (m *Manager) reportError(err error) {
 }
 
 // parseRequestMessage 解析请求消息
-func (m *Manager) parseRequestMessage(conn *Connection, data []byte, isComplete, looksLikeHTTP bool) error {
-	if requests, err := conn.Parser.ParseRequest(conn.ID, data); err == nil {
+func (m *Manager) parseRequestMessage(conn *Connection, data []byte, isComplete, looksLikeHTTP bool, packetInfo *types.PacketInfo) error {
+	if requests, err := conn.Parser.ParseRequest(conn.ID, data, packetInfo); err == nil {
 		for _, request := range requests {
 			if request != nil {
 				if err := m.handleParsedRequest(conn, request); err != nil {
@@ -576,8 +576,8 @@ func (m *Manager) parseRequestMessage(conn *Connection, data []byte, isComplete,
 }
 
 // parseResponseMessage 解析响应消息
-func (m *Manager) parseResponseMessage(conn *Connection, data []byte, isComplete, looksLikeHTTP bool) error {
-	if responses, err := conn.Parser.ParseResponse(conn.ID, data); err == nil {
+func (m *Manager) parseResponseMessage(conn *Connection, data []byte, isComplete, looksLikeHTTP bool, packetInfo *types.PacketInfo) error {
+	if responses, err := conn.Parser.ParseResponse(conn.ID, data, packetInfo); err == nil {
 		for _, response := range responses {
 			if response != nil {
 				if err := m.handleParsedResponse(conn, response); err != nil {
@@ -703,8 +703,6 @@ func (m *Manager) handleParsedResponse(conn *Connection, response *types.HTTPRes
 	if m.callbacks.OnResponseParsed != nil {
 		m.callbacks.OnResponseParsed(response)
 	}
-
-
 
 	return nil
 }

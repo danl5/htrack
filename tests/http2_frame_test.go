@@ -6,6 +6,7 @@ import (
 
 	"github.com/danl5/htrack/parser"
 	"github.com/danl5/htrack/parser/http2"
+	"github.com/danl5/htrack/types"
 )
 
 // TestFrameHeaderParsing 测试帧头解析
@@ -115,7 +116,11 @@ func TestHTTP2ParserFrameProcessing(t *testing.T) {
 
 	// 测试连接前导
 	preface := "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
-	reqs, err := parser.ParseRequest("test-conn", []byte(preface))
+	reqs, err := parser.ParseRequest("test-conn", []byte(preface), &types.PacketInfo{
+		Data:      []byte(preface),
+		Direction: types.DirectionRequest,
+		TCPTuple:  &types.TCPTuple{},
+	})
 	if err != nil {
 		t.Fatalf("解析连接前导失败: %v", err)
 	}
@@ -132,7 +137,11 @@ func TestHTTP2ParserFrameProcessing(t *testing.T) {
 		0x00, 0x00, 0x00, 0x00, // Stream ID: 0
 	}
 
-	reqs, err = parser.ParseRequest("test-conn", settingsFrame)
+	reqs, err = parser.ParseRequest("test-conn", settingsFrame, &types.PacketInfo{
+		Data:      settingsFrame,
+		Direction: types.DirectionRequest,
+		TCPTuple:  &types.TCPTuple{},
+	})
 	if err != nil {
 		t.Fatalf("解析SETTINGS帧失败: %v", err)
 	}
@@ -142,7 +151,11 @@ func TestHTTP2ParserFrameProcessing(t *testing.T) {
 
 	// 测试简单的HEADERS帧（模拟GET请求）
 	headersData := createSimpleHeadersFrame(t)
-	reqs, err = parser.ParseRequest("test-conn", headersData)
+	reqs, err = parser.ParseRequest("test-conn", headersData, &types.PacketInfo{
+		Data:      headersData,
+		Direction: types.DirectionRequest,
+		TCPTuple:  &types.TCPTuple{},
+	})
 	if err != nil {
 		t.Fatalf("解析HEADERS帧失败: %v", err)
 	}

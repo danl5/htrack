@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/danl5/htrack/parser"
+	"github.com/danl5/htrack/types"
 	"golang.org/x/net/http2/hpack"
 )
 
@@ -22,7 +23,11 @@ func TestHTTP2HeadersDataIntegration(t *testing.T) {
 			"server":         "test-server/1.0",
 		})
 
-		resps1, err := parser.ParseResponse("test-conn", responseHeadersFrame)
+		resps1, err := parser.ParseResponse("test-conn", responseHeadersFrame, &types.PacketInfo{
+			Data:      responseHeadersFrame,
+			Direction: types.DirectionResponse,
+			TCPTuple:  &types.TCPTuple{},
+		})
 		if err != nil {
 			t.Fatalf("解析响应HEADERS帧失败: %v", err)
 		}
@@ -35,7 +40,11 @@ func TestHTTP2HeadersDataIntegration(t *testing.T) {
 		responseData := []byte(`{"message": "Hello World"}`)
 		responseDataFrame := createResponseDataFrameID(t, 1, responseData, true)
 
-		resps2, err := parser.ParseResponse("test-conn", responseDataFrame)
+		resps2, err := parser.ParseResponse("test-conn", responseDataFrame, &types.PacketInfo{
+			Data:      responseDataFrame,
+			Direction: types.DirectionResponse,
+			TCPTuple:  &types.TCPTuple{},
+		})
 		if err != nil {
 			t.Fatalf("解析响应DATA帧失败: %v", err)
 		}
@@ -80,7 +89,11 @@ func TestHTTP2HeadersDataIntegration(t *testing.T) {
 			"user-agent":     "test-client/1.0",
 		})
 
-		reqs1, err := parser.ParseRequest("test-conn", requestHeadersFrame)
+		reqs1, err := parser.ParseRequest("test-conn", requestHeadersFrame, &types.PacketInfo{
+			Data:      requestHeadersFrame,
+			Direction: types.DirectionRequest,
+			TCPTuple:  &types.TCPTuple{},
+		})
 		if err != nil {
 			t.Fatalf("解析请求HEADERS帧失败: %v", err)
 		}
@@ -94,7 +107,11 @@ func TestHTTP2HeadersDataIntegration(t *testing.T) {
 		requestData := []byte(`{"query": "test data"}`)
 		requestDataFrame := createDataFrameWithStreamID(t, 3, requestData, true)
 
-		reqs2, err := parser.ParseRequest("test-conn", requestDataFrame)
+		reqs2, err := parser.ParseRequest("test-conn", requestDataFrame, &types.PacketInfo{
+			Data:      requestDataFrame,
+			Direction: types.DirectionRequest,
+			TCPTuple:  &types.TCPTuple{},
+		})
 		if err != nil {
 			t.Fatalf("解析请求DATA帧失败: %v", err)
 		}

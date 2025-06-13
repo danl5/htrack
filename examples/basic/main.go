@@ -73,7 +73,11 @@ func main() {
 			"Connection: keep-alive\r\n" +
 			"\r\n")
 
-	err := ht.ProcessPacket("conn-1", http1GetRequest, types.DirectionRequest)
+	err := ht.ProcessPacket("conn-1", &types.PacketInfo{
+		Data:      http1GetRequest,
+		Direction: types.DirectionRequest,
+		TCPTuple:  &types.TCPTuple{},
+	})
 	if err != nil {
 		log.Printf("处理请求失败: %v", err)
 	}
@@ -87,7 +91,11 @@ func main() {
 			"\r\n" +
 			`{"users":[{"id":1,"name":"Alice"}]}`)
 
-	err = ht.ProcessPacket("conn-1", http1GetResponse, types.DirectionResponse)
+	err = ht.ProcessPacket("conn-1", &types.PacketInfo{
+		Data:      http1GetResponse,
+		Direction: types.DirectionResponse,
+		TCPTuple:  &types.TCPTuple{},
+	})
 	if err != nil {
 		log.Printf("处理响应失败: %v", err)
 	}
@@ -102,7 +110,11 @@ func main() {
 			"\r\n" +
 			`{"name":"Bob","age":30}`)
 
-	err = ht.ProcessPacket("conn-2", http1PostRequest, types.DirectionRequest)
+	err = ht.ProcessPacket("conn-2", &types.PacketInfo{
+		Data:      http1PostRequest,
+		Direction: types.DirectionRequest,
+		TCPTuple:  &types.TCPTuple{},
+	})
 	if err != nil {
 		log.Printf("处理POST请求失败: %v", err)
 	}
@@ -115,7 +127,11 @@ func main() {
 			"\r\n" +
 			`{"id":2,"name":"Bob"}`)
 
-	err = ht.ProcessPacket("conn-2", http1PostResponse, types.DirectionResponse)
+	err = ht.ProcessPacket("conn-2", &types.PacketInfo{
+		Data:      http1PostResponse,
+		Direction: types.DirectionResponse,
+		TCPTuple:  &types.TCPTuple{},
+	})
 	if err != nil {
 		log.Printf("处理POST响应失败: %v", err)
 	}
@@ -128,17 +144,29 @@ func main() {
 	fragment3 := []byte("Accept: */*\r\n\r\n")
 
 	// 依次处理片段
-	err = ht.ProcessPacket("conn-3", fragment1, types.DirectionRequest)
+	err = ht.ProcessPacket("conn-3", &types.PacketInfo{
+		Data:      fragment1,
+		Direction: types.DirectionRequest,
+		TCPTuple:  &types.TCPTuple{},
+	})
 	if err != nil {
 		log.Printf("处理片段1失败: %v", err)
 	}
 
-	err = ht.ProcessPacket("conn-3", fragment2, types.DirectionRequest)
+	err = ht.ProcessPacket("conn-3", &types.PacketInfo{
+		Data:      fragment2,
+		Direction: types.DirectionRequest,
+		TCPTuple:  &types.TCPTuple{},
+	})
 	if err != nil {
 		log.Printf("处理片段2失败: %v", err)
 	}
 
-	err = ht.ProcessPacket("conn-3", fragment3, types.DirectionRequest)
+	err = ht.ProcessPacket("conn-3", &types.PacketInfo{
+		Data:      fragment3,
+		Direction: types.DirectionRequest,
+		TCPTuple:  &types.TCPTuple{},
+	})
 	if err != nil {
 		log.Printf("处理片段3失败: %v", err)
 	}

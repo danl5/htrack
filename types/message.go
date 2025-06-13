@@ -22,6 +22,9 @@ type HTTPMessage struct {
 	Timestamp time.Time            // 时间戳
 	RawData   []byte               // 原始数据
 
+	// 网络信息
+	TCPTuple *TCPTuple // TCP四元组信息
+
 	// HTTP/2特有字段
 	StreamID *uint32 // 流ID（HTTP/2）
 

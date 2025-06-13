@@ -142,14 +142,13 @@ func New(config *Config) *HTrack {
 
 // ProcessPacket 处理HTTP数据包
 // sessionID: 会话标识符（用于关联同一会话的请求响应）
-// data: HTTP协议数据包内容
-// direction: 数据方向（请求/响应）
-func (ht *HTrack) ProcessPacket(sessionID string, data []byte, direction types.Direction) error {
-	if len(data) == 0 {
+// packetInfo: 包含数据、方向和TCP四元组信息的数据包信息
+func (ht *HTrack) ProcessPacket(sessionID string, packetInfo *types.PacketInfo) error {
+	if len(packetInfo.Data) == 0 {
 		return errors.New("empty packet data")
 	}
 
-	return ht.manager.ProcessPacket(sessionID, data, direction)
+	return ht.manager.ProcessPacket(sessionID, packetInfo)
 }
 
 // SetEventHandlers 设置事件处理器
@@ -364,7 +363,7 @@ func DefaultConfig() *Config {
 // 便捷函数
 
 // ProcessHTTPPacket 处理HTTP数据包的便捷函数
-func ProcessHTTPPacket(sessionID string, data []byte, direction types.Direction) (*types.HTTPRequest, *types.HTTPResponse, error) {
+func ProcessHTTPPacket(sessionID string, packetInfo *types.PacketInfo) (*types.HTTPRequest, *types.HTTPResponse, error) {
 	ht := New(nil)
 	defer ht.Close()
 
@@ -386,7 +385,7 @@ func ProcessHTTPPacket(sessionID string, data []byte, direction types.Direction)
 	})
 
 	// 处理数据包
-	err := ht.ProcessPacket(sessionID, data, direction)
+	err := ht.ProcessPacket(sessionID, packetInfo)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -400,7 +399,11 @@ func ProcessHTTPPacket(sessionID string, data []byte, direction types.Direction)
 
 // ParseHTTPMessage 解析单个HTTP消息的便捷函数
 func ParseHTTPMessage(data []byte) (*types.HTTPRequest, *types.HTTPResponse, error) {
-	return ProcessHTTPPacket("temp-session", data, types.DirectionRequest)
+	return ProcessHTTPPacket("temp-session", &types.PacketInfo{
+		Data:      data,
+		Direction: types.DirectionRequest,
+		TCPTuple:  &types.TCPTuple{},
+	})
 }
 
 // setupChannelHandlers 设置内部channel事件处理器
