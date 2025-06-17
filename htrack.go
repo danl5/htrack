@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/danl5/htrack/connection"
+	"github.com/danl5/htrack/parser"
 	"github.com/danl5/htrack/types"
 )
 
@@ -12,6 +13,12 @@ import (
 type HTrack struct {
 	manager *connection.Manager
 	config  *Config
+
+	// 直接解析器（用于无sessionID的直接解析模式）
+	parsers map[types.HTTPVersion]parser.Parser
+	
+	// 事件处理器
+	eventHandlers *EventHandlers
 
 	// Channel输出
 	RequestChan  chan *types.HTTPRequest  // 请求完成通道
@@ -117,7 +124,11 @@ func New(config *Config) *HTrack {
 	ht := &HTrack{
 		manager: connection.NewManager(connConfig),
 		config:  config,
+		parsers: make(map[types.HTTPVersion]parser.Parser),
 	}
+
+	// 初始化解析器
+	ht.initParsers(config)
 
 	// 初始化channels
 	if config.EnableChannels {
@@ -142,12 +153,19 @@ func New(config *Config) *HTrack {
 
 // ProcessPacket 处理HTTP数据包
 // sessionID: 会话标识符（用于关联同一会话的请求响应）
+//           如果为空字符串，则启用直接解析模式，跳过数据包重组
 // packetInfo: 包含数据、方向和TCP四元组信息的数据包信息
 func (ht *HTrack) ProcessPacket(sessionID string, packetInfo *types.PacketInfo) error {
 	if len(packetInfo.Data) == 0 {
 		return errors.New("empty packet data")
 	}
 
+	// 如果sessionID为空，启用直接解析模式
+	if sessionID == "" {
+		return ht.ProcessPacketDirect(packetInfo)
+	}
+
+	// 否则使用现有的连接重组逻辑
 	return ht.manager.ProcessPacket(sessionID, packetInfo)
 }
 
@@ -156,6 +174,9 @@ func (ht *HTrack) SetEventHandlers(handlers *EventHandlers) {
 	if handlers == nil {
 		return
 	}
+
+	// 保存事件处理器引用（用于直接解析模式）
+	ht.eventHandlers = handlers
 
 	callbacks := &connection.Callbacks{}
 
@@ -454,4 +475,117 @@ func (ht *HTrack) CloseChannels() {
 		close(ht.ResponseChan)
 		ht.ResponseChan = nil
 	}
+}
+
+// initParsers 初始化解析器
+func (ht *HTrack) initParsers(config *Config) {
+	if config.EnableHTTP1 {
+		ht.parsers[types.HTTP10] = parser.NewHTTP1ParserWithVersion(types.HTTP10)
+		ht.parsers[types.HTTP11] = parser.NewHTTP1ParserWithVersion(types.HTTP11)
+	}
+	if config.EnableHTTP2 {
+		ht.parsers[types.HTTP2] = parser.NewHTTP2Parser()
+	}
+	// TLS解析器总是启用
+	ht.parsers[types.TLS_OTHER] = parser.NewTLSGenericParser()
+}
+
+// ProcessPacketDirect 直接解析数据包（无连接重组）
+func (ht *HTrack) ProcessPacketDirect(packetInfo *types.PacketInfo) error {
+	// 检测HTTP版本
+	version := ht.detectHTTPVersion(packetInfo.Data)
+	if version == types.Unknown {
+		return errors.New("unknown HTTP version")
+	}
+
+	// 获取对应的解析器
+	parser, exists := ht.parsers[version]
+	if !exists {
+		return errors.New("unsupported HTTP version")
+	}
+
+	// 根据数据包方向进行解析
+	switch packetInfo.Direction {
+	case types.DirectionClientToServer:
+		return ht.parseDirectRequest(parser, packetInfo)
+	case types.DirectionServerToClient:
+		return ht.parseDirectResponse(parser, packetInfo)
+	default:
+		// 如果方向未知，尝试两种解析方式
+		if err := ht.parseDirectRequest(parser, packetInfo); err == nil {
+			return nil
+		}
+		return ht.parseDirectResponse(parser, packetInfo)
+	}
+}
+
+// parseDirectRequest 直接解析请求
+func (ht *HTrack) parseDirectRequest(parser parser.Parser, packetInfo *types.PacketInfo) error {
+	requests, err := parser.ParseRequest("direct-session", packetInfo.Data, packetInfo)
+	if err != nil {
+		return err
+	}
+
+	// 触发事件回调
+	for _, request := range requests {
+		if request != nil {
+			// 触发请求解析事件
+			if ht.eventHandlers != nil && ht.eventHandlers.OnRequestParsed != nil {
+				ht.eventHandlers.OnRequestParsed(request)
+			}
+
+			// 发送到channel（如果启用）
+			if ht.RequestChan != nil && request.Complete {
+				select {
+				case ht.RequestChan <- request:
+					// 成功发送
+				default:
+					// channel已满，丢弃数据
+				}
+			}
+		}
+	}
+
+	return nil
+}
+
+// parseDirectResponse 直接解析响应
+func (ht *HTrack) parseDirectResponse(parser parser.Parser, packetInfo *types.PacketInfo) error {
+	responses, err := parser.ParseResponse("direct-session", packetInfo.Data, packetInfo)
+	if err != nil {
+		return err
+	}
+
+	// 触发事件回调
+	for _, response := range responses {
+		if response != nil {
+			// 触发响应解析事件
+			if ht.eventHandlers != nil && ht.eventHandlers.OnResponseParsed != nil {
+				ht.eventHandlers.OnResponseParsed(response)
+			}
+
+			// 发送到channel（如果启用）
+			if ht.ResponseChan != nil && response.Complete {
+				select {
+				case ht.ResponseChan <- response:
+					// 成功发送
+				default:
+					// channel已满，丢弃数据
+				}
+			}
+		}
+	}
+
+	return nil
+}
+
+// detectHTTPVersion 检测HTTP版本
+func (ht *HTrack) detectHTTPVersion(data []byte) types.HTTPVersion {
+	// 按优先级检测版本
+	for _, parser := range ht.parsers {
+		if detectedVersion := parser.DetectVersion(data); detectedVersion != types.Unknown {
+			return detectedVersion
+		}
+	}
+	return types.Unknown
 }
