@@ -27,6 +27,7 @@ type HTTPMessage struct {
 
 	// 进程信息
 	PID         uint32 // 进程ID
+	TID         uint32 // 线程ID
 	ProcessName string // 进程名称
 
 	// HTTP/2特有字段
@@ -76,8 +77,9 @@ func NewBaseMessageBuilder() *BaseMessageBuilder {
 }
 
 // SetProcessInfo 设置进程信息
-func (bmb *BaseMessageBuilder) SetProcessInfo(pid uint32, processName string) {
+func (bmb *BaseMessageBuilder) SetProcessInfo(pid uint32, tid uint32, processName string) {
 	bmb.message.PID = pid
+	bmb.message.TID = tid
 	bmb.message.ProcessName = processName
 }
 

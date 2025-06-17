@@ -524,6 +524,7 @@ func (p *HTTP2Parser) decodeCompleteHeaders(connectionID string, stream *HTTP2St
 			RawData:     completeHeaderBlock,
 			TCPTuple:    packetInfo.TCPTuple,
 			PID:         packetInfo.PID,
+			TID:         packetInfo.TID,
 			ProcessName: packetInfo.ProcessName,
 		},
 	}
@@ -663,6 +664,7 @@ func (p *HTTP2Parser) parseResponseHeadersFrame(connectionID string, header http
 			RawData:     data,
 			TCPTuple:    packetInfo.TCPTuple,
 			PID:         packetInfo.PID,
+			TID:         packetInfo.TID,
 			ProcessName: packetInfo.ProcessName,
 		},
 	}
@@ -755,6 +757,7 @@ func (p *HTTP2Parser) parseResponseDataFrame(connectionID string, header http2.F
 				RawData:     data,
 				TCPTuple:    packetInfo.TCPTuple,
 				PID:         packetInfo.PID,
+				TID:         packetInfo.TID,
 				ProcessName: packetInfo.ProcessName,
 			},
 		}
@@ -897,6 +900,7 @@ func (p *HTTP2Parser) buildDataRequest(stream *HTTP2Stream, packetInfo *types.Pa
 			RawData:     completeData,
 			TCPTuple:    packetInfo.TCPTuple,
 			PID:         packetInfo.PID,
+			TID:         packetInfo.TID,
 			ProcessName: packetInfo.ProcessName,
 		},
 	}

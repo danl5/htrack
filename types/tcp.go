@@ -15,5 +15,6 @@ type PacketInfo struct {
 	TCPTuple    *TCPTuple // TCP四元组信息
 	TimeDiff    uint64    // 时间偏移
 	PID         uint32    // 进程ID
+	TID         uint32    // 线程ID
 	ProcessName string    // 进程名称
 }

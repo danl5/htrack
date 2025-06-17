@@ -45,6 +45,7 @@ func TestProcessInfoPropagation(t *testing.T) {
 		TCPTuple:    &types.TCPTuple{SrcIP: "192.168.1.1", SrcPort: 12345, DstIP: "192.168.1.2", DstPort: 80},
 		TimeDiff:    0,
 		PID:         1234,
+		TID:         9876,
 		ProcessName: "test-process",
 	}
 
@@ -62,6 +63,10 @@ func TestProcessInfoPropagation(t *testing.T) {
 		t.Errorf("期望PID为1234，实际为%d", capturedRequest.PID)
 	}
 
+	if capturedRequest.TID != 9876 {
+		t.Errorf("期望TID为9876，实际为%d", capturedRequest.TID)
+	}
+
 	if capturedRequest.ProcessName != "test-process" {
 		t.Errorf("期望进程名为'test-process'，实际为'%s'", capturedRequest.ProcessName)
 	}
@@ -74,6 +79,7 @@ func TestProcessInfoPropagation(t *testing.T) {
 		TCPTuple:    &types.TCPTuple{SrcIP: "192.168.1.2", SrcPort: 80, DstIP: "192.168.1.1", DstPort: 12345},
 		TimeDiff:    100,
 		PID:         5678,
+		TID:         5432,
 		ProcessName: "server-process",
 	}
 
@@ -91,11 +97,15 @@ func TestProcessInfoPropagation(t *testing.T) {
 		t.Errorf("期望PID为5678，实际为%d", capturedResponse.PID)
 	}
 
+	if capturedResponse.TID != 5432 {
+		t.Errorf("期望TID为5432，实际为%d", capturedResponse.TID)
+	}
+
 	if capturedResponse.ProcessName != "server-process" {
 		t.Errorf("期望进程名为'server-process'，实际为'%s'", capturedResponse.ProcessName)
 	}
 
-	t.Logf("进程信息测试通过 - 请求PID: %d, 进程名: %s; 响应PID: %d, 进程名: %s",
-		capturedRequest.PID, capturedRequest.ProcessName,
-		capturedResponse.PID, capturedResponse.ProcessName)
+	t.Logf("进程信息测试通过 - 请求PID: %d, TID: %d, 进程名: %s; 响应PID: %d, TID: %d, 进程名: %s",
+		capturedRequest.PID, capturedRequest.TID, capturedRequest.ProcessName,
+		capturedResponse.PID, capturedResponse.TID, capturedResponse.ProcessName)
 }
