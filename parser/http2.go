@@ -190,13 +190,23 @@ func (p *HTTP2Parser) ParseRequest(connectionID string, data []byte, packetInfo 
 		}
 
 		frameData := data[offset+9 : frameEnd]
-		req, err := p.parseFrame(connectionID, header, frameData, packetInfo)
-		if err != nil {
-			return requests, fmt.Errorf("failed to parse frame (stream %d, type %d): %w", header.StreamID, header.Type, err)
-		}
+		
+		// 当connectionID为空时，直接返回每一帧而不进行重组
+		if connectionID == "" {
+			req := p.createFrameRequest(header, frameData, packetInfo)
+			if req != nil {
+				requests = append(requests, req)
+			}
+		} else {
+			// 正常的重组逻辑
+			req, err := p.parseFrame(connectionID, header, frameData, packetInfo)
+			if err != nil {
+				return requests, fmt.Errorf("failed to parse frame (stream %d, type %d): %w", header.StreamID, header.Type, err)
+			}
 
-		if req != nil {
-			requests = append(requests, req)
+			if req != nil {
+				requests = append(requests, req)
+			}
 		}
 
 		offset = frameEnd
@@ -239,13 +249,23 @@ func (p *HTTP2Parser) ParseResponse(connectionID string, data []byte, packetInfo
 		}
 
 		frameData := data[offset+9 : frameEnd]
-		resp, err := p.parseResponseFrame(connectionID, header, frameData, packetInfo)
-		if err != nil {
-			return responses, fmt.Errorf("failed to parse response frame (stream %d, type %d): %w", header.StreamID, header.Type, err)
-		}
+		
+		// 当connectionID为空时，直接返回每一帧而不进行重组
+		if connectionID == "" {
+			resp := p.createFrameResponse(header, frameData, packetInfo)
+			if resp != nil {
+				responses = append(responses, resp)
+			}
+		} else {
+			// 正常的重组逻辑
+			resp, err := p.parseResponseFrame(connectionID, header, frameData, packetInfo)
+			if err != nil {
+				return responses, fmt.Errorf("failed to parse response frame (stream %d, type %d): %w", header.StreamID, header.Type, err)
+			}
 
-		if resp != nil {
-			responses = append(responses, resp)
+			if resp != nil {
+				responses = append(responses, resp)
+			}
 		}
 
 		offset = frameEnd
@@ -295,9 +315,21 @@ func (p *HTTP2Parser) parseFrame(connectionID string, header http2.FrameHeader, 
 		return p.parseSettingsFrame(header, data, packetInfo)
 	case http2.FrameContinuation:
 		return p.parseContinuationFrame(connectionID, header, data, packetInfo)
+	case http2.FramePriority:
+		return p.parsePriorityFrame(header, data, packetInfo)
+	case http2.FrameRSTStream:
+		return p.parseRSTStreamFrame(header, data, packetInfo)
+	case http2.FramePushPromise:
+		return p.parsePushPromiseFrame(connectionID, header, data, packetInfo)
+	case http2.FramePing:
+		return p.parsePingFrame(header, data, packetInfo)
+	case http2.FrameGoAway:
+		return p.parseGoAwayFrame(header, data, packetInfo)
+	case http2.FrameWindowUpdate:
+		return p.parseWindowUpdateFrame(header, data, packetInfo)
 	default:
-		// 其他帧类型暂时忽略
-		return nil, nil
+		// 未知帧类型，创建通用帧请求
+		return p.parseUnknownFrame(header, data, packetInfo)
 	}
 }
 
@@ -818,7 +850,8 @@ func validateHTTP2Frame(data []byte) types.HTTPVersion {
 	}
 
 	// 验证帧类型（RFC 7540定义的帧类型）
-	validFrameTypes := map[byte]bool{
+	// 注意：HTTP/2允许扩展帧类型，所以我们不严格限制帧类型
+	knownFrameTypes := map[byte]bool{
 		0: true, // DATA
 		1: true, // HEADERS
 		2: true, // PRIORITY
@@ -831,26 +864,27 @@ func validateHTTP2Frame(data []byte) types.HTTPVersion {
 		9: true, // CONTINUATION
 	}
 
-	if !validFrameTypes[frameType] {
-		return types.Unknown
-	}
+	// 对于已知帧类型，进行严格验证；对于未知帧类型，进行基本验证
+	isKnownFrame := knownFrameTypes[frameType]
 
-	// 验证流ID的合法性
-	switch frameType {
-	case 4, 6, 7, 8: // SETTINGS, PING, GOAWAY, WINDOW_UPDATE
-		if frameType == 4 || frameType == 6 || frameType == 7 {
+	// 验证流ID的合法性（仅对已知帧类型进行严格验证）
+	if isKnownFrame {
+		switch frameType {
+		case 4, 6, 7: // SETTINGS, PING, GOAWAY
 			if streamID != 0 {
 				return types.Unknown // 这些帧必须在连接级别
 			}
-		}
-	case 0, 1, 2, 3, 5, 9: // DATA, HEADERS, PRIORITY, RST_STREAM, PUSH_PROMISE, CONTINUATION
-		if streamID == 0 {
-			return types.Unknown // 这些帧必须关联到流
+		case 8: // WINDOW_UPDATE
+			// WINDOW_UPDATE可以在连接级别(streamID=0)或流级别(streamID>0)
+		case 0, 1, 2, 3, 5, 9: // DATA, HEADERS, PRIORITY, RST_STREAM, PUSH_PROMISE, CONTINUATION
+			if streamID == 0 {
+				return types.Unknown // 这些帧必须关联到流
+			}
 		}
 	}
 
-	// 验证标志位的合法性
-	if !validateFrameFlags(frameType, flags) {
+	// 验证标志位的合法性（仅对已知帧类型进行严格验证）
+	if isKnownFrame && !validateFrameFlags(frameType, flags) {
 		return types.Unknown
 	}
 
@@ -893,7 +927,11 @@ func (p *HTTP2Parser) buildDataRequest(stream *HTTP2Stream, packetInfo *types.Pa
 	// 否则创建新的数据请求（仅数据帧的情况）
 	request := &types.HTTPRequest{
 		HTTPMessage: types.HTTPMessage{
+			Headers:     make(http.Header),
 			Body:        completeData,
+			Proto:       "HTTP/2.0",
+			ProtoMajor:  2,
+			ProtoMinor:  0,
 			Timestamp:   time.Now(),
 			StreamID:    &stream.ID,
 			Complete:    stream.RequestComplete,
@@ -903,7 +941,12 @@ func (p *HTTP2Parser) buildDataRequest(stream *HTTP2Stream, packetInfo *types.Pa
 			TID:         packetInfo.TID,
 			ProcessName: packetInfo.ProcessName,
 		},
+		Method: "HTTP2_FRAME_DATA",
 	}
+
+	// 设置HTTP/2帧类型标识
+	request.Headers.Set("X-HTTP2-Frame-Type", "DATA")
+	request.Headers.Set("X-HTTP2-Stream-ID", fmt.Sprintf("%d", stream.ID))
 
 	stream.Request = request
 	return request, nil
@@ -965,4 +1008,402 @@ func validateFrameLength(header http2.FrameHeader) error {
 		}
 	}
 	return nil
+}
+
+// createFrameRequest 为单个HTTP/2帧创建请求对象（用于直接解析模式）
+func (p *HTTP2Parser) createFrameRequest(header http2.FrameHeader, frameData []byte, packetInfo *types.PacketInfo) *types.HTTPRequest {
+	// 重新构建完整的帧数据（包含帧头）
+	fullFrameData := make([]byte, 9+len(frameData))
+	
+	// 构建帧头
+	binary.BigEndian.PutUint32(fullFrameData[0:4], uint32(header.Length)<<8) // 长度字段在高24位
+	fullFrameData[3] = byte(header.Type)
+	fullFrameData[4] = byte(header.Flags)
+	binary.BigEndian.PutUint32(fullFrameData[5:9], header.StreamID)
+	
+	// 复制帧数据
+	copy(fullFrameData[9:], frameData)
+	
+	// 创建基础的HTTPRequest对象
+	request := &types.HTTPRequest{
+		HTTPMessage: types.HTTPMessage{
+			Headers:     make(http.Header),
+			Proto:       "HTTP/2.0",
+			ProtoMajor:  2,
+			ProtoMinor:  0,
+			Timestamp:   time.Now(),
+			StreamID:    &header.StreamID,
+			RawData:     fullFrameData,
+			Body:        frameData,
+			TCPTuple:    packetInfo.TCPTuple,
+			PID:         packetInfo.PID,
+			TID:         packetInfo.TID,
+			ProcessName: packetInfo.ProcessName,
+			Complete:    true, // 单帧总是完整的
+		},
+		Method: fmt.Sprintf("HTTP2_FRAME_%s", p.getFrameTypeName(header.Type)),
+	}
+	
+	// 添加帧相关的头部信息
+	request.Headers.Set("X-HTTP2-Frame-Type", p.getFrameTypeName(header.Type))
+	request.Headers.Set("X-HTTP2-Frame-Flags", fmt.Sprintf("%d", header.Flags))
+	request.Headers.Set("X-HTTP2-Stream-ID", fmt.Sprintf("%d", header.StreamID))
+	request.Headers.Set("X-HTTP2-Frame-Length", fmt.Sprintf("%d", header.Length))
+	
+	return request
+}
+
+// createFrameResponse 为单个HTTP/2帧创建响应对象（用于直接解析模式）
+func (p *HTTP2Parser) createFrameResponse(header http2.FrameHeader, frameData []byte, packetInfo *types.PacketInfo) *types.HTTPResponse {
+	// 重新构建完整的帧数据（包含帧头）
+	fullFrameData := make([]byte, 9+len(frameData))
+	
+	// 构建帧头
+	binary.BigEndian.PutUint32(fullFrameData[0:4], uint32(header.Length)<<8) // 长度字段在高24位
+	fullFrameData[3] = byte(header.Type)
+	fullFrameData[4] = byte(header.Flags)
+	binary.BigEndian.PutUint32(fullFrameData[5:9], header.StreamID)
+	
+	// 复制帧数据
+	copy(fullFrameData[9:], frameData)
+	
+	// 创建基础的HTTPResponse对象
+	response := &types.HTTPResponse{
+		HTTPMessage: types.HTTPMessage{
+			Headers:     make(http.Header),
+			Proto:       "HTTP/2.0",
+			ProtoMajor:  2,
+			ProtoMinor:  0,
+			Timestamp:   time.Now(),
+			StreamID:    &header.StreamID,
+			RawData:     fullFrameData,
+			Body:        frameData,
+			TCPTuple:    packetInfo.TCPTuple,
+			PID:         packetInfo.PID,
+			TID:         packetInfo.TID,
+			ProcessName: packetInfo.ProcessName,
+			Complete:    true, // 单帧总是完整的
+		},
+		StatusCode: 0, // 帧级别没有状态码
+		Status:     fmt.Sprintf("HTTP2_FRAME_%s", p.getFrameTypeName(header.Type)),
+	}
+	
+	// 添加帧相关的头部信息
+	response.Headers.Set("X-HTTP2-Frame-Type", p.getFrameTypeName(header.Type))
+	response.Headers.Set("X-HTTP2-Frame-Flags", fmt.Sprintf("%d", header.Flags))
+	response.Headers.Set("X-HTTP2-Stream-ID", fmt.Sprintf("%d", header.StreamID))
+	response.Headers.Set("X-HTTP2-Frame-Length", fmt.Sprintf("%d", header.Length))
+	
+	return response
+}
+
+// parsePriorityFrame 解析PRIORITY帧
+func (p *HTTP2Parser) parsePriorityFrame(header http2.FrameHeader, data []byte, packetInfo *types.PacketInfo) (*types.HTTPRequest, error) {
+	if header.StreamID == 0 {
+		return nil, errors.New("PRIORITY frame with stream ID 0")
+	}
+	if len(data) != 5 {
+		return nil, errors.New("invalid PRIORITY frame length")
+	}
+
+	// 创建基础请求对象
+	request := &types.HTTPRequest{
+		HTTPMessage: types.HTTPMessage{
+			Headers:     make(http.Header),
+			Proto:       "HTTP/2.0",
+			ProtoMajor:  2,
+			ProtoMinor:  0,
+			Timestamp:   time.Now(),
+			StreamID:    &header.StreamID,
+			RawData:     data,
+			Body:        data,
+			TCPTuple:    packetInfo.TCPTuple,
+			PID:         packetInfo.PID,
+			TID:         packetInfo.TID,
+			ProcessName: packetInfo.ProcessName,
+			Complete:    true,
+		},
+		Method: "HTTP2_FRAME_PRIORITY",
+	}
+
+	// 解析优先级信息
+	dependsOn := binary.BigEndian.Uint32(data[0:4]) & 0x7FFFFFFF
+	exclusive := (data[0] & 0x80) != 0
+	weight := data[4]
+
+	request.Headers.Set("X-HTTP2-Frame-Type", "PRIORITY")
+	request.Headers.Set("X-HTTP2-Stream-ID", fmt.Sprintf("%d", header.StreamID))
+	request.Headers.Set("X-HTTP2-Priority-Depends-On", fmt.Sprintf("%d", dependsOn))
+	request.Headers.Set("X-HTTP2-Priority-Exclusive", fmt.Sprintf("%t", exclusive))
+	request.Headers.Set("X-HTTP2-Priority-Weight", fmt.Sprintf("%d", weight))
+
+	return request, nil
+}
+
+// parseRSTStreamFrame 解析RST_STREAM帧
+func (p *HTTP2Parser) parseRSTStreamFrame(header http2.FrameHeader, data []byte, packetInfo *types.PacketInfo) (*types.HTTPRequest, error) {
+	if header.StreamID == 0 {
+		return nil, errors.New("RST_STREAM frame with stream ID 0")
+	}
+	if len(data) != 4 {
+		return nil, errors.New("invalid RST_STREAM frame length")
+	}
+
+	// 创建基础请求对象
+	request := &types.HTTPRequest{
+		HTTPMessage: types.HTTPMessage{
+			Headers:     make(http.Header),
+			Proto:       "HTTP/2.0",
+			ProtoMajor:  2,
+			ProtoMinor:  0,
+			Timestamp:   time.Now(),
+			StreamID:    &header.StreamID,
+			RawData:     data,
+			Body:        data,
+			TCPTuple:    packetInfo.TCPTuple,
+			PID:         packetInfo.PID,
+			TID:         packetInfo.TID,
+			ProcessName: packetInfo.ProcessName,
+			Complete:    true,
+		},
+		Method: "HTTP2_FRAME_RST_STREAM",
+	}
+
+	// 解析错误码
+	errorCode := binary.BigEndian.Uint32(data)
+
+	request.Headers.Set("X-HTTP2-Frame-Type", "RST_STREAM")
+	request.Headers.Set("X-HTTP2-Stream-ID", fmt.Sprintf("%d", header.StreamID))
+	request.Headers.Set("X-HTTP2-Error-Code", fmt.Sprintf("%d", errorCode))
+
+	return request, nil
+}
+
+// parsePushPromiseFrame 解析PUSH_PROMISE帧
+func (p *HTTP2Parser) parsePushPromiseFrame(connectionID string, header http2.FrameHeader, data []byte, packetInfo *types.PacketInfo) (*types.HTTPRequest, error) {
+	if header.StreamID == 0 {
+		return nil, errors.New("PUSH_PROMISE frame with stream ID 0")
+	}
+	if len(data) < 4 {
+		return nil, errors.New("invalid PUSH_PROMISE frame length")
+	}
+
+	offset := 0
+
+	// 处理填充
+	if header.Flags&http2.FlagPushPromisePadded != 0 {
+		if len(data) < 1 {
+			return nil, errors.New("invalid PUSH_PROMISE frame with padding")
+		}
+		padLength := data[0]
+		offset = 1
+		if int(padLength) >= len(data)-offset-4 {
+			return nil, errors.New("invalid padding length in PUSH_PROMISE frame")
+		}
+	}
+
+	// 解析承诺流ID
+	promisedStreamID := binary.BigEndian.Uint32(data[offset:offset+4]) & 0x7FFFFFFF
+	offset += 4
+
+	// 创建基础请求对象
+	request := &types.HTTPRequest{
+		HTTPMessage: types.HTTPMessage{
+			Headers:     make(http.Header),
+			Proto:       "HTTP/2.0",
+			ProtoMajor:  2,
+			ProtoMinor:  0,
+			Timestamp:   time.Now(),
+			StreamID:    &header.StreamID,
+			RawData:     data,
+			Body:        data[offset:],
+			TCPTuple:    packetInfo.TCPTuple,
+			PID:         packetInfo.PID,
+			TID:         packetInfo.TID,
+			ProcessName: packetInfo.ProcessName,
+			Complete:    (header.Flags&http2.FlagPushPromiseEndHeaders) != 0,
+		},
+		Method: "HTTP2_FRAME_PUSH_PROMISE",
+	}
+
+	request.Headers.Set("X-HTTP2-Frame-Type", "PUSH_PROMISE")
+	request.Headers.Set("X-HTTP2-Stream-ID", fmt.Sprintf("%d", header.StreamID))
+	request.Headers.Set("X-HTTP2-Promised-Stream-ID", fmt.Sprintf("%d", promisedStreamID))
+	request.Headers.Set("X-HTTP2-Frame-Flags", fmt.Sprintf("%d", header.Flags))
+
+	return request, nil
+}
+
+// parsePingFrame 解析PING帧
+func (p *HTTP2Parser) parsePingFrame(header http2.FrameHeader, data []byte, packetInfo *types.PacketInfo) (*types.HTTPRequest, error) {
+	if header.StreamID != 0 {
+		return nil, errors.New("PING frame with non-zero stream ID")
+	}
+	if len(data) != 8 {
+		return nil, errors.New("invalid PING frame length")
+	}
+
+	// 创建基础请求对象
+	request := &types.HTTPRequest{
+		HTTPMessage: types.HTTPMessage{
+			Headers:     make(http.Header),
+			Proto:       "HTTP/2.0",
+			ProtoMajor:  2,
+			ProtoMinor:  0,
+			Timestamp:   time.Now(),
+			StreamID:    &header.StreamID,
+			RawData:     data,
+			Body:        data,
+			TCPTuple:    packetInfo.TCPTuple,
+			PID:         packetInfo.PID,
+			TID:         packetInfo.TID,
+			ProcessName: packetInfo.ProcessName,
+			Complete:    true,
+		},
+		Method: "HTTP2_FRAME_PING",
+	}
+
+	isAck := (header.Flags & http2.FlagPingAck) != 0
+
+	request.Headers.Set("X-HTTP2-Frame-Type", "PING")
+	request.Headers.Set("X-HTTP2-Stream-ID", fmt.Sprintf("%d", header.StreamID))
+	request.Headers.Set("X-HTTP2-Ping-Ack", fmt.Sprintf("%t", isAck))
+	request.Headers.Set("X-HTTP2-Ping-Data", fmt.Sprintf("%x", data))
+
+	return request, nil
+}
+
+// parseGoAwayFrame 解析GOAWAY帧
+func (p *HTTP2Parser) parseGoAwayFrame(header http2.FrameHeader, data []byte, packetInfo *types.PacketInfo) (*types.HTTPRequest, error) {
+	if header.StreamID != 0 {
+		return nil, errors.New("GOAWAY frame with non-zero stream ID")
+	}
+	if len(data) < 8 {
+		return nil, errors.New("invalid GOAWAY frame length")
+	}
+
+	// 创建基础请求对象
+	request := &types.HTTPRequest{
+		HTTPMessage: types.HTTPMessage{
+			Headers:     make(http.Header),
+			Proto:       "HTTP/2.0",
+			ProtoMajor:  2,
+			ProtoMinor:  0,
+			Timestamp:   time.Now(),
+			StreamID:    &header.StreamID,
+			RawData:     data,
+			Body:        data[8:], // 调试数据
+			TCPTuple:    packetInfo.TCPTuple,
+			PID:         packetInfo.PID,
+			TID:         packetInfo.TID,
+			ProcessName: packetInfo.ProcessName,
+			Complete:    true,
+		},
+		Method: "HTTP2_FRAME_GOAWAY",
+	}
+
+	// 解析GOAWAY信息
+	lastStreamID := binary.BigEndian.Uint32(data[0:4]) & 0x7FFFFFFF
+	errorCode := binary.BigEndian.Uint32(data[4:8])
+
+	request.Headers.Set("X-HTTP2-Frame-Type", "GOAWAY")
+	request.Headers.Set("X-HTTP2-Stream-ID", fmt.Sprintf("%d", header.StreamID))
+	request.Headers.Set("X-HTTP2-Last-Stream-ID", fmt.Sprintf("%d", lastStreamID))
+	request.Headers.Set("X-HTTP2-Error-Code", fmt.Sprintf("%d", errorCode))
+
+	return request, nil
+}
+
+// parseWindowUpdateFrame 解析WINDOW_UPDATE帧
+func (p *HTTP2Parser) parseWindowUpdateFrame(header http2.FrameHeader, data []byte, packetInfo *types.PacketInfo) (*types.HTTPRequest, error) {
+	if len(data) != 4 {
+		return nil, errors.New("invalid WINDOW_UPDATE frame length")
+	}
+
+	// 创建基础请求对象
+	request := &types.HTTPRequest{
+		HTTPMessage: types.HTTPMessage{
+			Headers:     make(http.Header),
+			Proto:       "HTTP/2.0",
+			ProtoMajor:  2,
+			ProtoMinor:  0,
+			Timestamp:   time.Now(),
+			StreamID:    &header.StreamID,
+			RawData:     data,
+			Body:        data,
+			TCPTuple:    packetInfo.TCPTuple,
+			PID:         packetInfo.PID,
+			TID:         packetInfo.TID,
+			ProcessName: packetInfo.ProcessName,
+			Complete:    true,
+		},
+		Method: "HTTP2_FRAME_WINDOW_UPDATE",
+	}
+
+	// 解析窗口大小增量
+	windowSizeIncrement := binary.BigEndian.Uint32(data) & 0x7FFFFFFF
+
+	request.Headers.Set("X-HTTP2-Frame-Type", "WINDOW_UPDATE")
+	request.Headers.Set("X-HTTP2-Stream-ID", fmt.Sprintf("%d", header.StreamID))
+	request.Headers.Set("X-HTTP2-Window-Size-Increment", fmt.Sprintf("%d", windowSizeIncrement))
+
+	return request, nil
+}
+
+// parseUnknownFrame 解析未知帧类型
+func (p *HTTP2Parser) parseUnknownFrame(header http2.FrameHeader, data []byte, packetInfo *types.PacketInfo) (*types.HTTPRequest, error) {
+	// 创建基础请求对象
+	request := &types.HTTPRequest{
+		HTTPMessage: types.HTTPMessage{
+			Headers:     make(http.Header),
+			Proto:       "HTTP/2.0",
+			ProtoMajor:  2,
+			ProtoMinor:  0,
+			Timestamp:   time.Now(),
+			StreamID:    &header.StreamID,
+			RawData:     data,
+			Body:        data,
+			TCPTuple:    packetInfo.TCPTuple,
+			PID:         packetInfo.PID,
+			TID:         packetInfo.TID,
+			ProcessName: packetInfo.ProcessName,
+			Complete:    true,
+		},
+		Method: fmt.Sprintf("HTTP2_FRAME_UNKNOWN_%d", header.Type),
+	}
+
+	request.Headers.Set("X-HTTP2-Frame-Type", fmt.Sprintf("UNKNOWN_%d", header.Type))
+	request.Headers.Set("X-HTTP2-Stream-ID", fmt.Sprintf("%d", header.StreamID))
+	request.Headers.Set("X-HTTP2-Frame-Flags", fmt.Sprintf("%d", header.Flags))
+	request.Headers.Set("X-HTTP2-Frame-Length", fmt.Sprintf("%d", header.Length))
+
+	return request, nil
+}
+
+// getFrameTypeName 获取帧类型名称
+func (p *HTTP2Parser) getFrameTypeName(frameType http2.FrameType) string {
+	switch frameType {
+	case http2.FrameData:
+		return "DATA"
+	case http2.FrameHeaders:
+		return "HEADERS"
+	case http2.FramePriority:
+		return "PRIORITY"
+	case http2.FrameRSTStream:
+		return "RST_STREAM"
+	case http2.FrameSettings:
+		return "SETTINGS"
+	case http2.FramePushPromise:
+		return "PUSH_PROMISE"
+	case http2.FramePing:
+		return "PING"
+	case http2.FrameGoAway:
+		return "GOAWAY"
+	case http2.FrameWindowUpdate:
+		return "WINDOW_UPDATE"
+	case http2.FrameContinuation:
+		return "CONTINUATION"
+	default:
+		return fmt.Sprintf("UNKNOWN_%d", frameType)
+	}
 }

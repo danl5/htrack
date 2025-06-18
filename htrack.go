@@ -16,7 +16,7 @@ type HTrack struct {
 
 	// 直接解析器（用于无sessionID的直接解析模式）
 	parsers map[types.HTTPVersion]parser.Parser
-	
+
 	// 事件处理器
 	eventHandlers *EventHandlers
 
@@ -153,7 +153,9 @@ func New(config *Config) *HTrack {
 
 // ProcessPacket 处理HTTP数据包
 // sessionID: 会话标识符（用于关联同一会话的请求响应）
-//           如果为空字符串，则启用直接解析模式，跳过数据包重组
+//
+//	如果为空字符串，则启用直接解析模式，跳过数据包重组
+//
 // packetInfo: 包含数据、方向和TCP四元组信息的数据包信息
 func (ht *HTrack) ProcessPacket(sessionID string, packetInfo *types.PacketInfo) error {
 	if len(packetInfo.Data) == 0 {
@@ -521,7 +523,7 @@ func (ht *HTrack) ProcessPacketDirect(packetInfo *types.PacketInfo) error {
 
 // parseDirectRequest 直接解析请求
 func (ht *HTrack) parseDirectRequest(parser parser.Parser, packetInfo *types.PacketInfo) error {
-	requests, err := parser.ParseRequest("direct-session", packetInfo.Data, packetInfo)
+	requests, err := parser.ParseRequest("", packetInfo.Data, packetInfo)
 	if err != nil {
 		return err
 	}
@@ -551,7 +553,7 @@ func (ht *HTrack) parseDirectRequest(parser parser.Parser, packetInfo *types.Pac
 
 // parseDirectResponse 直接解析响应
 func (ht *HTrack) parseDirectResponse(parser parser.Parser, packetInfo *types.PacketInfo) error {
-	responses, err := parser.ParseResponse("direct-session", packetInfo.Data, packetInfo)
+	responses, err := parser.ParseResponse("", packetInfo.Data, packetInfo)
 	if err != nil {
 		return err
 	}
